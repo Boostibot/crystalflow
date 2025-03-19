@@ -159,7 +159,7 @@ struct Vars {
     Real uy;
 };
 
-extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Const_State* const_state, Sim_Params params)
+extern "C" double sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Const_State* const_state, Sim_Params params)
 {
     csize nx = next->nx;
     csize ny = next->ny;
@@ -188,12 +188,17 @@ extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Con
     Real dt = params.dt;
     Real dx = params.region_width / nx;
     Real dy = params.region_height / ny;
-    Real Sc = 0;
     Real lambda = params.dynamic_viscosity;
     Real mu = params.second_viscosity;
-
+    
+    Real R_spec = 287.052874;
+    Real T = params.temperature;
     //TODO: try the second version of tiled for as well - should be faster more kernels where most of the time
     // is spent computing.
+
+    #define PRINT_F(x) printf(#x " = %e\n", (double) (x))
+
+    #define PRINT_VARS(v) printf(#v " = {rho:%e ux:%e uy:%e}\n", (v).rho, (v).ux, (v).uy)
 
     //Precaclulate first order derivations
     cuda_tiled_for_2D<1, 1, Vars>(0, 0, nx, ny, 
@@ -216,11 +221,11 @@ extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Con
             Sim_Flags cflags = flags[i];
             Vars vc = shared[tx + ty*tile_size_x];
             
-            next_rhos[i] = vc.rho;
-            next_uxs[i] = vc.ux;
-            next_uys[i] = vc.uy;
+            // next_rhos[i] = vc.rho;
+            // next_uxs[i] = vc.ux;
+            // next_uys[i] = vc.uy;
 
-            return;
+            // return;
             Vars vn = shared[tx + (ty+1)*tile_size_x];
             Vars vs = shared[tx + (ty-1)*tile_size_x];
             Vars ve = shared[(tx+1) + ty*tile_size_x];
@@ -239,14 +244,13 @@ extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Con
             Real ux = vc.ux;
             Real uy = vc.uy;
 
+            Real dx_rho = (ve.rho - vw.rho)/(2*dx);
             Real dx_ux = (ve.ux - vw.ux)/(2*dx);
             Real dx_uy = (ve.uy - vw.uy)/(2*dx);
 
-            Real dy_ux = (vn.ux - vs.ux)/(2*dy);
-            Real dy_uy = (vn.ux - vs.ux)/(2*dy);
-
-            Real dx_rho = (ve.rho - vw.rho)/(2*dx);
             Real dy_rho = (vn.rho - vs.rho)/(2*dy);
+            Real dy_ux = (vn.ux - vs.ux)/(2*dy);
+            Real dy_uy = (vn.uy - vs.uy)/(2*dy);
 
             Real dxx_ux = (ve.ux + 2*vc.ux - vw.ux)/(dx*dx);
             Real dxx_uy = (ve.uy + 2*vc.uy - vw.uy)/(dx*dx);
@@ -257,13 +261,24 @@ extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Con
             Real dxy_ux = (vne.ux - vnw.ux - vse.ux + vsw.ux)/(4*dx*dy);
             Real dxy_uy = (vne.uy - vnw.uy - vse.uy + vsw.uy)/(4*dx*dy);
 
-            Real ux_dx_ux = ux > 0 ? ux*(vc.ux - vw.ux)/dx : ux*(ve.ux - vc.ux)/dx;
-            Real ux_dx_uy = ux > 0 ? ux*(vc.uy - vw.uy)/dy : ux*(ve.uy - vc.uy)/dy;
-            Real uy_dy_ux = uy > 0 ? uy*(vc.uy - vw.uy)/dx : uy*(ve.uy - vc.uy)/dx;
-            Real uy_dy_uy = uy > 0 ? uy*(vc.uy - vw.uy)/dy : uy*(ve.uy - vc.uy)/dy;
+            #if 0
+            Real ux_dx_ux = ux >= 0 ? ux*(vc.ux - vw.ux)/dx : ux*(ve.ux - vc.ux)/dx;
+            Real ux_dx_uy = ux >= 0 ? ux*(vc.uy - vw.uy)/dx : ux*(ve.uy - vc.uy)/dx;
+            Real uy_dy_ux = uy >= 0 ? uy*(vc.ux - vs.ux)/dy : uy*(vn.ux - vc.ux)/dy;
+            Real uy_dy_uy = uy >= 0 ? uy*(vc.uy - vs.uy)/dy : uy*(vn.uy - vc.uy)/dy;
 
-            Real ux_dx_rho = ux > 0 ? ux*(vc.rho - vw.rho)/dx : ux*(ve.rho - vc.rho)/dx;
-            Real uy_dy_rho = uy > 0 ? uy*(vc.rho - vw.rho)/dy : uy*(ve.rho - vc.rho)/dy;
+            Real ux_dx_rho = ux >= 0 ? ux*(vc.rho - vw.rho)/dx : ux*(ve.rho - vc.rho)/dx;
+            Real uy_dy_rho = uy >= 0 ? uy*(vc.rho - vs.rho)/dy : uy*(vn.rho - vc.rho)/dy;
+            #else
+
+            Real ux_dx_ux = true ? ux*(vc.ux - vw.ux)/dx : ux*(ve.ux - vc.ux)/dx;
+            Real ux_dx_uy = true ? ux*(vc.uy - vw.uy)/dx : ux*(ve.uy - vc.uy)/dx;
+            Real uy_dy_ux = true ? uy*(vc.ux - vs.ux)/dy : uy*(vn.ux - vc.ux)/dy;
+            Real uy_dy_uy = true ? uy*(vc.uy - vs.uy)/dy : uy*(vn.uy - vc.uy)/dy;
+
+            Real ux_dx_rho = true ? ux*(vc.rho - vw.rho)/dx : ux*(ve.rho - vc.rho)/dx;
+            Real uy_dy_rho = true ? uy*(vc.rho - vs.rho)/dy : uy*(vn.rho - vc.rho)/dy;
+            #endif
 
             if(cflags) {
                 if(cflags & SIM_SET_DX_UX) dx_ux = set_dx_ux[i];
@@ -282,20 +297,157 @@ extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Con
                 if(cflags & SIM_SET_DY_RHO) uy_dy_rho = uy*dy_rho;
             }
 
+            #if 1
             Real dt_rho = -(ux_dx_rho + uy_dy_rho) + rho*(dx_ux + dy_uy);
-            Real dt_ux = -(ux_dx_ux + uy_dy_ux) - Sc/rho*dx_rho + Fx
+            Real dt_ux = -(ux_dx_ux + uy_dy_ux) - R_spec*T/rho*dx_rho + Fx
                 + 1/rho*((lambda + 2*mu)*dxx_ux + lambda*dxy_uy + mu*dyy_ux + mu*dxy_uy);
-            Real dt_uy = -(ux_dx_uy + uy_dy_uy) - Sc/rho*dy_rho + Fy
+            Real dt_uy = -(ux_dx_uy + uy_dy_uy) - R_spec*T/rho*dy_rho + Fy
                 + 1/rho*((lambda + 2*mu)*dyy_uy + lambda*dxy_ux + mu*dxx_uy + mu*dxy_ux);
+            #else
+            Real dt_rho = -(ux_dx_rho + uy_dy_rho) + rho*(dx_ux + dy_uy);
+            Real dt_ux = -(ux_dx_ux + uy_dy_ux) - R_spec*T/rho*dx_rho + Fx;
+            Real dt_uy = -(ux_dx_uy + uy_dy_uy) - R_spec*T/rho*dy_rho + Fy;
+            #endif
 
-            next_rhos[x + y*nx] = rho + dt*dt_rho;
-            next_uxs[x + y*nx] = ux + dt*dt_ux;
-            next_uys[x + y*nx] = uy + dt*dt_uy;
+            if(0)
+            if(x == 1 && y == 2) {
+                PRINT_VARS(vc);
+                PRINT_VARS(vn);
+                PRINT_VARS(vs);
+                PRINT_VARS(ve);
+                PRINT_VARS(vw);
+                PRINT_VARS(vne);
+                PRINT_VARS(vnw);
+                PRINT_VARS(vse);
+                PRINT_VARS(vsw);
+
+                PRINT_F(dx);
+                PRINT_F(dy);
+                PRINT_F(ux);
+                PRINT_F(uy);
+                PRINT_F(dx_ux);
+                PRINT_F(dx_uy);
+                PRINT_F(dy_ux);
+                PRINT_F(dy_uy);
+                PRINT_F(dx_rho);
+                PRINT_F(dy_rho);
+                PRINT_F(dxx_ux);
+                PRINT_F(dxx_uy);
+                PRINT_F(dyy_ux);
+                PRINT_F(dyy_uy);
+                PRINT_F(dxy_ux);
+                PRINT_F(dxy_uy);
+                PRINT_F(ux_dx_ux);
+                PRINT_F(ux_dx_uy);
+                PRINT_F(uy_dy_ux);
+                PRINT_F(uy_dy_uy);
+                PRINT_F(ux_dx_rho);
+                PRINT_F(uy_dy_rho);
+
+                PRINT_F(dt_rho);
+                PRINT_F(dt_ux);
+                PRINT_F(dt_uy);
+            }
+
+            if(cflags) {
+                if(cflags & SIM_SET_RHO) dt_rho = 0;
+                if(cflags & SIM_SET_UX) dt_ux = 0;
+                if(cflags & SIM_SET_UY) dt_uy = 0;
+            }
+
+            // dt_rho = 0;
+            next_rhos[i] = rho + dt*dt_rho;
+            next_uxs[i] = ux + dt*dt_ux;
+            next_uys[i] = uy + dt*dt_uy;
         }
     );
 
+    return dt;
+}
+
+extern "C" bool sim_make_flow_vertices(Sim_Flow_Vertex* vertices, Real* uxs, Real* uys, Draw_Lines_Config config)
+{
+    csize nx = (csize) config.nx;
+    csize ny = (csize) config.ny;
+    csize pix_size = config.pix_size;
+    float pix_sizef = config.pix_size;
+
+    cuda_for_2D(0, 0, nx/pix_size, ny/pix_size, [=]SHARED(csize xi, csize yi){
+        xi *= pix_size;
+        yi *= pix_size;
+        csize i = xi + yi*nx;
+
+        Real realux = 0;
+        Real realuy = 0;
+        for(csize ox = 0; ox < pix_size; ox++)
+            for(csize oy = 0; oy < pix_size; oy++)
+            {
+                csize ic = (xi + ox) + (yi + oy)*nx;
+                realux += uxs[ic];
+                realuy += uys[ic];
+            }
+        
+        float ux = (float) realux / (pix_sizef*pix_sizef);
+        float uy = (float) realuy / (pix_sizef*pix_sizef);
+
+        //normalize direction
+        float len = hypotf(ux, uy);
+        if(len > 0) {
+            ux /= len;
+            uy /= len;
+        }
+
+        //calculate variability
+        #if 0
+        Real variability = 0;
+        for(csize ox = 0; ox < pix_size; ox++)
+            for(csize oy = 0; oy < pix_size; oy++)
+            {
+                csize ic = (xi + ox) + (yi + oy)*nx;
+                variability += fabs(ux*uxs[ic] + ux*uys[ic]);
+            }
+        variability = 1 - variability/(pix_sizef*pix_sizef);
+        #endif
+
+        float x = (xi + pix_sizef/2)*config.dx*2 - 1;
+        float y = (yi + pix_sizef/2)*config.dy*2 - 1;
+
+        float scaled_len = len*config.scale;
+        if(scaled_len < config.min_size)
+            scaled_len = config.min_size;
+        if(scaled_len > config.max_size)
+            scaled_len = config.max_size;
+        if(len == 0)
+            len = 1;
+
+        float px = uy;
+        float py = -ux;
+
+        float ex = ux*scaled_len + x;
+        float ey = uy*scaled_len + y;
+
+        float v1x = x + px*config.width_i0;
+        float v1y = y + py*config.width_i0;
+
+        float v2x = x - px*config.width_i0;
+        float v2y = y - py*config.width_i0;
+
+        float v3x = ex + px*config.width_i1;
+        float v3y = ey + py*config.width_i1;
+
+        float v4x = ex - px*config.width_i1;
+        float v4y = ey - py*config.width_i1;
+
+        vertices[i*6+0] = Sim_Flow_Vertex{v1x, v1y, config.rgba_i0};
+        vertices[i*6+1] = Sim_Flow_Vertex{v2x, v2y, config.rgba_i0};
+        vertices[i*6+2] = Sim_Flow_Vertex{v3x, v3y, config.rgba_i1};
+        vertices[i*6+3] = Sim_Flow_Vertex{v2x, v2y, config.rgba_i0};
+        vertices[i*6+4] = Sim_Flow_Vertex{v3x, v3y, config.rgba_i1};
+        vertices[i*6+5] = Sim_Flow_Vertex{v4x, v4y, config.rgba_i1};
+    });
     return true;
 }
+
 
 extern "C" bool sim_run_tests()
 {

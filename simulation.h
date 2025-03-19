@@ -118,7 +118,7 @@ extern "C" bool sim_const_state_init(Sim_Const_State* state, int32_t nx, int32_t
 extern "C" void sim_mut_state_deinit(Sim_Mut_State* state);
 extern "C" void sim_const_state_deinit(Sim_Const_State* state);
 
-extern "C" bool sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Const_State* const_state, Sim_Params params);
+extern "C" double sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_Const_State* const_state, Sim_Params params);
 
 typedef enum {
     MODIFY_UPLOAD,
@@ -141,3 +141,30 @@ static const char* solver_type_to_cstring(Sim_Solver_Type type)
         case SOLVER_TYPE_NAIVE_EULER: return "naive-euler";
     }
 }
+
+typedef struct Sim_Flow_Vertex {
+    float x;
+    float y;
+    uint32_t packed_color;
+} Sim_Flow_Vertex;
+
+typedef struct Draw_Lines_Config {
+    isize nx;
+    isize ny;
+    isize pix_size;
+
+    float scale;
+    float max_size;
+    float min_size;
+
+    float width_i0;
+    float width_i1;
+
+    uint32_t rgba_i0;
+    uint32_t rgba_i1;
+
+    float dx;
+    float dy;
+} Draw_Lines_Config;
+
+extern "C" bool sim_make_flow_vertices(Sim_Flow_Vertex* vertices, Sim_Real* uxs, Sim_Real* uys, Draw_Lines_Config config);

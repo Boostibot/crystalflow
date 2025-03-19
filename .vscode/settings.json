@@ -2,6 +2,17 @@
     "files.associations": {
         "ranges": "cpp",
         "iterator": "cpp",
-        "random": "cpp"
+        "random": "cpp",
+        "array": "cpp",
+        "string": "cpp",
+        "string_view": "cpp",
+        "span": "cpp",
+        "vector": "cpp",
+        "cmath": "cpp",
+        "bitset": "cpp",
+        "chrono": "cpp",
+        "map": "cpp",
+        "set": "cpp",
+        "unordered_map": "cpp"
     }
 }

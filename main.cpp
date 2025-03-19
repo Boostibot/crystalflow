@@ -69,18 +69,9 @@ void sim_set_wall_noslip_at(Sim_Const_State* cpu, int32_t x, int32_t y)
                 if(0 <= cy && cy < ny)
                 {
                     isize i = (isize) cx + (isize) cy*nx;
-                    cpu->flags[i] = SIM_SET_DERS | SIM_SET_VALS;
-                    cpu->set_rho[i] = 0;
+                    cpu->flags[i] = SIM_SET_UX | SIM_SET_UY;
                     cpu->set_ux[i] = 0;
                     cpu->set_uy[i] = 0;
-                    
-                    cpu->set_dx_rho[i] = 0;
-                    cpu->set_dx_ux[i] = 0;
-                    cpu->set_dx_uy[i] = 0;
-
-                    cpu->set_dy_rho[i] = 0;
-                    cpu->set_dy_ux[i] = 0;
-                    cpu->set_dy_uy[i] = 0;
                 }
         }
 
@@ -134,10 +125,13 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
         cpu->set_uy[i0] = 0;
         cpu->set_rho[i0] = intake_rho;
 
-        cpu->flags[i1] = SIM_SET_VALS;
-        cpu->set_ux[i1] = outake;
-        cpu->set_uy[i1] = 0;
-        cpu->set_rho[i1] = outake_rho;
+        cpu->flags[i1] = SIM_SET_DERS;
+        cpu->set_dx_ux[i1] = 0;
+        cpu->set_dx_uy[i1] = 0;
+        cpu->set_dx_rho[i1] = 0;
+        // cpu->set_dy_ux[i1] = 0;
+        // cpu->set_dy_uy[i1] = 0;
+        // cpu->set_dy_rho[i1] = 0;
     }
 
     //set walls
@@ -476,9 +470,9 @@ int main(int argc, char** argv)
             double next_snapshot_times = (double) (snapshot_times_i + 1) * config.simul_t1_t / config.snapshot_times;
 
             //enforce boundary conditions
-            double intake_ux = 0;
-            double intake_uy = 0;
-            double intake_rho = 0;
+            double intake_ux = last_intake_ux;
+            double intake_uy = last_intake_uy;
+            double intake_rho = last_intake_rho;
             if(app->config.simul_t0_t <= app->sim_time && app->sim_time < app->config.simul_tf_t)
             {
                 double t = (app->sim_time - app->config.simul_t0_t)/(app->config.simul_tf_t - app->config.simul_t0_t);
@@ -550,18 +544,22 @@ int main(int argc, char** argv)
                 draw_sci_cuda_memory("main", prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.rho);
                 
                 Draw_Lines_Config lines_config = {0};
-                lines_config.max_size = 1.0f/prev_state.nx*2;
+                lines_config.nx = prev_state.nx;
+                lines_config.ny = prev_state.ny;
+                lines_config.pix_size = 1;
+
+                lines_config.max_size = (float) lines_config.pix_size/prev_state.nx*2;
                 lines_config.min_size = 0;
                 lines_config.rgba_i0 = 0;
-                lines_config.rgba_i1 = 0xFFFFFF;
+                lines_config.rgba_i1 = 0;
 
-                lines_config.width_i0 = 1.0f/prev_state.nx/10;
-                lines_config.width_i1 = 0.001f;
+                lines_config.width_i0 = (float) lines_config.pix_size/prev_state.nx/4;
+                lines_config.width_i1 = 0.000f;
                 lines_config.scale = 0.1f;
                 lines_config.dx = 1.0f/prev_state.nx;
                 lines_config.dy = 1.0f/prev_state.ny;
 
-                draw_flow_arrows("flow", prev_state.nx, prev_state.ny, prev_state.ux, prev_state.uy, lines_config);
+                draw_flow_arrows("flow", prev_state.ux, prev_state.uy, lines_config);
                 glfwSwapBuffers(window);
             }
 

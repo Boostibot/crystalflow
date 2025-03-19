@@ -323,133 +323,23 @@ void draw_sci_texture(unsigned texture, float min, float max)
     #undef TEXTURE_BINDING
 }
 
-typedef struct {
-    float x;
-    float y;
-    uint32_t packed_color;
-} Vertex;
-
-typedef int64_t isize;  
-typedef struct Vertex_Buffer {
-    Vertex* data;
-    isize capacity;
-    isize count;
-} Vertex_Buffer;
-
-void vertex_buffer_reserve(Vertex_Buffer* buffer, isize count)
-{
-    if(count > buffer->capacity)
-    {
-        isize new_cap = buffer->capacity*3/2 + 8;
-        if(new_cap < count)
-            new_cap = count;
-
-        buffer->data = (Vertex*) realloc(buffer->data, (size_t) new_cap*sizeof(Vertex));
-        buffer->capacity = new_cap;
-    }
-}
-
-void vertex_buffer_ressize(Vertex_Buffer* buffer, isize count)
-{
-    vertex_buffer_reserve(buffer, count);
-    if(count < buffer->count)
-        memset(buffer->data + buffer->count, 0, (size_t)(buffer->count - count)*sizeof(Vertex));
-    buffer->count = count;
-}
-
-void vertex_buffer_push(Vertex_Buffer* buffer, float x, float y, uint32_t color)
-{
-    vertex_buffer_reserve(buffer, buffer->count + 1);
-    Vertex v = {x, y, color};
-    buffer->data[buffer->count++] = v;
-}
-
-static Vertex_Buffer g_vertex_buffer = {0};
-
-typedef struct Draw_Lines_Config {
-    float scale;
-    float max_size;
-    float min_size;
-
-    float width_i0;
-    float width_i1;
-
-    uint32_t rgba_i0;
-    uint32_t rgba_i1;
-
-    float dx;
-    float dy;
-} Draw_Lines_Config;
-
 #define MAX_VERTICES 6*1024*1024
 
-void draw_flow_arrows(const char* name, isize nx, isize ny, Real* cuda_uxs, Real* cuda_uys, Draw_Lines_Config config)
+void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lines_Config config)
 {
-    static size_t cpu_alloced = 0;
-    static float* uxs = NULL;
-    static float* uys = NULL;
+    isize count = config.nx*config.ny;
+    static Sim_Flow_Vertex* cuda_vertices = NULL;
+    static Sim_Flow_Vertex* cpu_vertices = NULL;
+    static isize allocated_count = 0;
+    if(allocated_count < count) {
+        free(cpu_vertices);
+        cpu_vertices = (Sim_Flow_Vertex*) malloc((size_t) count*6*sizeof(Sim_Flow_Vertex));
 
-    if(cpu_alloced < (size_t) (nx*ny))
-    {
-        uxs = (float*) realloc(uxs, (size_t) (nx*ny)*sizeof(float));
-        uys = (float*) realloc(uys, (size_t) (nx*ny)*sizeof(float));
-        cpu_alloced = (size_t) (nx*ny);
-    } 
+        cudaFree(cuda_vertices);
+        cudaMalloc(&cuda_vertices, (size_t) count*6*sizeof(Sim_Flow_Vertex));
 
-    sim_modify_float((Real*) cuda_uxs, (float*) uxs, (size_t) (nx*ny), MODIFY_DOWNLOAD);
-    sim_modify_float((Real*) cuda_uys, (float*) uys, (size_t) (nx*ny), MODIFY_DOWNLOAD);
-
-    isize needed_size = 6*nx*ny;
-    if(needed_size > MAX_VERTICES)
-        needed_size = MAX_VERTICES;
-    if(g_vertex_buffer.capacity == 0)
-        vertex_buffer_reserve(&g_vertex_buffer, MAX_VERTICES);
-
-    vertex_buffer_ressize(&g_vertex_buffer, needed_size);
-    for(isize xi = 0; xi < nx; xi++)
-        for(isize yi = 0; yi < ny; yi++)
-        {
-            isize i = xi + yi*nx;
-            float ux = uxs[i];
-            float uy = uys[i];
-
-            float x = (xi + 0.5f)*config.dx*2 - 1;
-            float y = (yi + 0.5f)*config.dy*2 - 1;
-
-            float len = hypotf(ux, uy);
-            float scaled_len = len*config.scale;
-            if(scaled_len < config.min_size)
-                scaled_len = config.min_size;
-            if(scaled_len > config.max_size)
-                scaled_len = config.max_size;
-        
-            float px = uy/len;
-            float py = -ux/len;
-
-            float ex = ux/len*scaled_len + x;
-            float ey = uy/len*scaled_len + y;
-
-            float v1x = x + px*config.width_i0;
-            float v1y = y + py*config.width_i0;
-
-            float v2x = x - px*config.width_i0;
-            float v2y = y - py*config.width_i0;
-
-            float v3x = ex + px*config.width_i0;
-            float v3y = ey + py*config.width_i0;
-
-            float v4x = ex - px*config.width_i0;
-            float v4y = ey - py*config.width_i0;
-
-            if(i*6 + 5 < needed_size) {
-                g_vertex_buffer.data[i*6+0] = Vertex{v1x, v1y, config.rgba_i0};
-                g_vertex_buffer.data[i*6+1] = Vertex{v2x, v2y, config.rgba_i0};
-                g_vertex_buffer.data[i*6+2] = Vertex{v3x, v3y, config.rgba_i0};
-                g_vertex_buffer.data[i*6+3] = Vertex{v2x, v2y, config.rgba_i0};
-                g_vertex_buffer.data[i*6+4] = Vertex{v3x, v3y, config.rgba_i0};
-                g_vertex_buffer.data[i*6+5] = Vertex{v4x, v4y, config.rgba_i0};
-            }
-        }
+        allocated_count = count;
+    }
 
     static GLuint VBO = 0;
     static GLuint VAO = 0;
@@ -460,10 +350,10 @@ void draw_flow_arrows(const char* name, isize nx, isize ny, Real* cuda_uxs, Real
         glBindVertexArray(VAO);
 
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES*sizeof(Vertex), NULL, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES*sizeof(Sim_Flow_Vertex), NULL, GL_DYNAMIC_DRAW);
 
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*) offsetof(Vertex, x));
-        glVertexAttribPointer(1, 1, GL_INT, GL_FALSE, sizeof(Vertex), (void*) offsetof(Vertex, packed_color));
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Sim_Flow_Vertex), (void*) offsetof(Sim_Flow_Vertex, x));
+        glVertexAttribPointer(1, 1, GL_INT, GL_FALSE, sizeof(Sim_Flow_Vertex), (void*) offsetof(Sim_Flow_Vertex, packed_color));
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
 
@@ -503,11 +393,15 @@ void draw_flow_arrows(const char* name, isize nx, isize ny, Real* cuda_uxs, Real
         shader = compile_shader(vertex_shader_source, frag_shader_source);
     }
 
+    sim_make_flow_vertices(cuda_vertices, cuda_uxs, cuda_uys, config);
+    sim_modify(cuda_vertices, cpu_vertices, (size_t) count*6*sizeof(Sim_Flow_Vertex), MODIFY_DOWNLOAD);
+
+    isize copy_size = MIN(count*6, MAX_VERTICES);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLuint) g_vertex_buffer.count*sizeof(Vertex), g_vertex_buffer.data);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLuint) copy_size*sizeof(Sim_Flow_Vertex), cpu_vertices);
     glBindVertexArray(VAO);
     glUseProgram(shader); 
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei) g_vertex_buffer.count);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei) copy_size);
 }
 
 void draw_sci_cuda_memory(const char* name, int width, int height, float min, float max, bool linear_filtering, const Real* cuda_memory)

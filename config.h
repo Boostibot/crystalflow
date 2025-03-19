@@ -374,6 +374,9 @@ bool sim_read_config(const char* path, Sim_Config* config, const char* overrides
             key_value_ini_append(&pairs, overrides[i]);
 
         uint8_t read_state = true;
+        
+        read_state &= (uint8_t) key_value_ini_get_int64(pairs, &config->nx, "simulation", "nx");
+        read_state &= (uint8_t) key_value_ini_get_int64(pairs, &config->ny, "simulation", "ny");;
         double dx = 0;
         double dy = 0;
         if(key_value_ini_get_double(pairs, &config->region_width, "simulation", "region_width")
@@ -387,8 +390,6 @@ bool sim_read_config(const char* path, Sim_Config* config, const char* overrides
         }
         else
             read_state = false;
-        read_state &= (uint8_t) key_value_ini_get_int64(pairs, &config->nx, "simulation", "nx");
-        read_state &= (uint8_t) key_value_ini_get_int64(pairs, &config->ny, "simulation", "ny");;
 
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->dt, "simulation", "dt");
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->second_viscosity, "simulation", "second_viscosity");

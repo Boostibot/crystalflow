@@ -1,0 +1,10 @@
+zvysovat difuzi ze zacatku + dt 
+-> nastavit dt a zvysovat difuzi dokud ok
+-> a pak zmenosvta difuzi
+
+predelat do finite volume?
+-> slabe stlac proudeni
+
+-> preformulu do konecnejch objemu
+
+-> vizualizace

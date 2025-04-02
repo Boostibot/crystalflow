@@ -17,11 +17,11 @@
 #define DEF_WINDOW_WIDTH	        1024 
 #define DEF_WINDOW_HEIGHT	        1024
 
-#define FPS_DISPLAY_PERIOD          0.0
+#define FPS_DISPLAY_PERIOD          0.1
 #define SCREEN_UPDATE_PERIOD        0.1
 #define SCREEN_UPDATE_IDLE_PERIOD   0.1
 #define POLL_EVENTS_PERIOD          0.1
-#define FREE_RUN_PERIOD             0.001
+#define FREE_RUN_PERIOD             0.01
 
 typedef Sim_Real Real;
 static double clock_s();
@@ -69,14 +69,14 @@ void sim_set_wall_noslip_at(Sim_Const_State* cpu, int32_t x, int32_t y)
                 if(0 <= cy && cy < ny)
                 {
                     isize i = (isize) cx + (isize) cy*nx;
-                    cpu->flags[i] = SIM_SET_UX | SIM_SET_UY;
+                    cpu->flags[i] |= SIM_SET_UX | SIM_SET_UY;
                     cpu->set_ux[i] = 0;
                     cpu->set_uy[i] = 0;
                 }
         }
 
     isize i = (isize) x + (isize) y*nx;
-    cpu->flags[i] = SIM_SET_DERS | SIM_SET_VALS;
+    cpu->flags[i] |= SIM_SET_DERS | SIM_SET_VALS;
     cpu->set_rho[i] = 0;
     cpu->set_ux[i] = 0;
     cpu->set_uy[i] = 0;
@@ -97,6 +97,8 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
     double obstacle_x = config.region_width/3;
     double obstacle_y = config.region_height/2;
     double obstacle_diam2 = obstacle_diam*obstacle_diam;
+    double dx = config.region_width/cpu->nx;
+    double dy = config.region_height/cpu->ny;
 
     int32_t nx = cpu->nx;
     int32_t ny = cpu->ny;
@@ -115,31 +117,99 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
         }
     }
 
-    //input/output is dirichlet
-    for(int32_t y = 0; y < ny; y++) {
-        isize i0 = (isize) 0 + (isize) y*nx;
-        isize i1 = (isize) (nx-1) + (isize) y*nx;
+    //0
+    //tlak vlna
+    //rychlost
+    
+    //0
+    //1
+    //2
+    //4
+    //9
+    //4
+    //2
+    //1
+    //0
 
-        cpu->flags[i0] = SIM_SET_VALS;
-        cpu->set_ux[i0] = intake;
-        cpu->set_uy[i0] = 0;
-        cpu->set_rho[i0] = intake_rho;
+    int32_t intake_top = 3;
+    int32_t intake_bot = ny-3;
+    double intake_h = (intake_bot - intake_top)*dy;
+    double intake_mid = (intake_bot + intake_top)*dy/2;
+    #if 1
+    //intake with fixed velocity, neumann density 
+    // for(int32_t y = 0; y < ny; y++) {
+    //     for(int32_t x = 0; x < 1; x++) {
+    //         isize i = (isize) x + (isize) y*nx;
+    //         cpu->flags[i] |= SIM_SET_VALS;
+    //         cpu->set_rho[i] = intake_rho;
+    //         cpu->set_ux[i] = 0;
+    //         cpu->set_uy[i] = 0;
+    //     }
+    // }
+    for(int32_t y = intake_top; y < intake_bot; y++) {
+        for(int32_t x = 0; x < 1; x++) {
+            isize i = (isize) x + (isize) y*nx;
+            double y_pos = (y + 0.5)*dy;
+            double parabola = (y_pos - intake_mid)/(intake_h/2);
+            double factor = CLAMP((1 - parabola*parabola), 0, 1);
+            double ux = intake*2*factor;
 
-        cpu->flags[i1] = SIM_SET_DERS;
-        cpu->set_dx_ux[i1] = 0;
-        cpu->set_dx_uy[i1] = 0;
-        cpu->set_dx_rho[i1] = 0;
-        // cpu->set_dy_ux[i1] = 0;
-        // cpu->set_dy_uy[i1] = 0;
-        // cpu->set_dy_rho[i1] = 0;
+            cpu->flags[i] = SIM_SET_UX | SIM_SET_UY | SIM_SET_DX_RHO | SIM_SET_DY_RHO;
+            cpu->set_ux[i] = ux;
+            cpu->set_uy[i] = 0;
+            cpu->set_dx_rho[i] = 0;
+            cpu->set_dy_rho[i] = 0;
+        }
     }
 
-    //set walls
-    for(int32_t x = 0; x < nx; x++)
-        sim_set_wall_noslip_at(cpu, x, 0);
+    //outtake with neumann velocity, fixed pressure
+    for(int32_t y = 0; y < ny; y++) {
+        for(int32_t x = nx-1; x < nx; x++) {
+            isize i = (isize) x + (isize) y*nx;
+            cpu->flags[i] = (SIM_SET_DERS &~(SIM_SET_DX_RHO | SIM_SET_DY_RHO)) | SIM_SET_RHO;
+            cpu->set_dx_ux[i] = 0;
+            cpu->set_dx_uy[i] = 0;
+            cpu->set_rho[i] = intake_rho;
+        }
+    }
+    #else
+    //intake with fixed velocity, neumann density 
+    for(int32_t y = 3; y < ny-3; y++) {
+        for(int32_t x = 0; x < 1; x++) {
+            isize i = (isize) x + (isize) y*nx;
+            double y_pos = (y + 0.5)*dy;
+            double factor = (y_pos - config.region_height/2)/(config.region_height/2);
+            double ux = intake*(1 - factor*factor);
 
-    for(int32_t x = 0; x < nx; x++)
-        sim_set_wall_noslip_at(cpu, x, ny - 1);
+            cpu->flags[i] = SIM_SET_UX | SIM_SET_UY | SIM_SET_DX_RHO | SIM_SET_DY_RHO;
+            cpu->set_ux[i] = 0;
+            cpu->set_uy[i] = 0;
+            cpu->set_dx_rho[i] = 0;
+            cpu->set_dy_rho[i] = 0;
+        }
+    }
+
+    //outtake with neumann velocity, fixed pressure
+    for(int32_t y = 0; y < ny; y++) {
+        for(int32_t x = nx-1; x < nx; x++) {
+            isize i = (isize) x + (isize) y*nx;
+            cpu->flags[i] = (SIM_SET_DERS &~(SIM_SET_DX_RHO | SIM_SET_DY_RHO)) | SIM_SET_RHO;
+            cpu->set_dx_ux[i] = 0;
+            cpu->set_dx_uy[i] = 0;
+            cpu->set_rho[i] = 2;
+        }
+    }
+
+    #endif
+
+    //set walls
+    for(int32_t y = 0; y < 2; y++)
+        for(int32_t x = 0; x < nx; x++)
+            sim_set_wall_noslip_at(cpu, x, y);
+
+    for(int32_t y = ny-2; y < ny; y++)
+        for(int32_t x = 0; x < nx; x++)
+            sim_set_wall_noslip_at(cpu, x, y);
 }
 
 void sim_set_constant_initial_conditions(Sim_Mut_State* cpu, Real rho, Real ux, Real uy, const Sim_Config& config)
@@ -434,6 +504,7 @@ int main(int argc, char** argv)
         double poll_last_time = 0;
 
         double processing_time = 0;
+        double rendering_time = 0;
         double acumulated_processing_time = 0;
 
         int snapshot_every_i = 0;
@@ -540,8 +611,10 @@ int main(int argc, char** argv)
 
             if(update_screen)
             {
+                double screen_start_time = clock_s();
                 render_last_time = frame_start_time;
                 draw_sci_cuda_memory("main", prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.rho);
+                // draw_sci_cuda_memory("main", prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ux);
                 
                 Draw_Lines_Config lines_config = {0};
                 lines_config.nx = prev_state.nx;
@@ -561,6 +634,8 @@ int main(int argc, char** argv)
 
                 draw_flow_arrows("flow", prev_state.ux, prev_state.uy, lines_config);
                 glfwSwapBuffers(window);
+                double screen_end_time = clock_s();
+                rendering_time = screen_end_time - screen_start_time;
             }
 
             if(update_frame_time_display)
@@ -582,6 +657,7 @@ int main(int argc, char** argv)
                 app->sim_time += sim_step(&curr_state, &prev_state, &app->gpu_const_state, params);
                 simulated_last_time = frame_start_time;
                 app->remaining_steps -= 1;
+                // cudaDeviceSynchronize();
                 double solver_end_time = clock_s();
 
                 processing_time = solver_end_time - solver_start_time;
@@ -600,7 +676,6 @@ int main(int argc, char** argv)
 
             //if is idle for the last 0.5 seconds limit the framerate to IDLE_RENDER_FREQ
             bool do_frame_limiting = simulated_last_time + 0.5 < frame_start_time;
-            do_frame_limiting = true;
             if(do_frame_limiting && app->real_dt < SCREEN_UPDATE_IDLE_PERIOD)
                 wait_s(SCREEN_UPDATE_IDLE_PERIOD - app->real_dt);
 

@@ -381,9 +381,9 @@ void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lin
 
             void main()
             {
-                int r = a_color & int(0xFF);
+                int r = (a_color >> 16) & int(0xFF);
                 int g = (a_color >> 8) & int(0xFF);
-                int b = (a_color >> 16) & int(0xFF);
+                int b = (a_color >> 0) & int(0xFF);
                 int a = 255 - (a_color >> 24) & int(0xFF);
                 v_color = vec4(r/255.0, g/255.0, b/255.0, a/255.0);
                 gl_Position = vec4(a_pos, 1, 1);

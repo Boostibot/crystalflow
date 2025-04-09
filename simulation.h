@@ -40,6 +40,8 @@ enum {
         | SIM_SET_DX_UX | SIM_SET_DY_UX
         | SIM_SET_DX_UY | SIM_SET_DY_UY
         | SIM_SET_DX_RHO | SIM_SET_DY_RHO,
+
+    SIM_DONT_SIMULATE = 1 << 15,
 };
 
 typedef struct Sim_Mut_State {

@@ -76,7 +76,7 @@ void sim_set_wall_noslip_at(Sim_Const_State* cpu, int32_t x, int32_t y)
         }
 
     isize i = (isize) x + (isize) y*nx;
-    cpu->flags[i] |= SIM_SET_DERS | SIM_SET_VALS;
+    cpu->flags[i] |= SIM_SET_DERS | SIM_SET_VALS | SIM_DONT_SIMULATE;
     cpu->set_rho[i] = 0;
     cpu->set_ux[i] = 0;
     cpu->set_uy[i] = 0;
@@ -155,6 +155,9 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
             double ux = intake*2*factor;
 
             cpu->flags[i] = SIM_SET_UX | SIM_SET_UY | SIM_SET_DX_RHO | SIM_SET_DY_RHO;
+            if(x == 0)
+                cpu->flags[i] |= SIM_DONT_SIMULATE;
+
             cpu->set_ux[i] = ux;
             cpu->set_uy[i] = 0;
             cpu->set_dx_rho[i] = 0;
@@ -167,6 +170,9 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
         for(int32_t x = nx-1; x < nx; x++) {
             isize i = (isize) x + (isize) y*nx;
             cpu->flags[i] = (SIM_SET_DERS &~(SIM_SET_DX_RHO | SIM_SET_DY_RHO)) | SIM_SET_RHO;
+            if(x == nx-1)
+                cpu->flags[i] |= SIM_DONT_SIMULATE;
+
             cpu->set_dx_ux[i] = 0;
             cpu->set_dx_uy[i] = 0;
             cpu->set_rho[i] = intake_rho;

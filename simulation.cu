@@ -384,11 +384,18 @@ extern "C" double sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_C
             // Real dt_uy = 0
             //     + 1/rho*((lambda + 2*mu)*ct_dyy_uy + (lambda + mu)*ct_dxy_ux + mu*ct_dxx_uy);
 
+            // vc.flags |= SIM_DONT_SIMULATE;
             if(vc.flags) {
-                if(vc.flags & SIM_SET_RHO) dt_rho = 0;
-                if(vc.flags & SIM_SET_UX) dt_ux = 0;
-                if(vc.flags & SIM_SET_UY) dt_uy = 0;
+                if(vc.flags & (SIM_SET_RHO | SIM_DONT_SIMULATE)) dt_rho = 0;
+                if(vc.flags & (SIM_SET_UX | SIM_DONT_SIMULATE)) dt_ux = 0;
+                if(vc.flags & (SIM_SET_UY | SIM_DONT_SIMULATE)) dt_uy = 0;
             }
+
+            // if((vc.flags & SIM_DONT_SIMULATE) != 0) {
+            //     dt_rho = 0;
+            //     dt_ux = 0;
+            //     dt_uy = 0;
+            // }
 
             next_rhos[i] = rho + dt*dt_rho;
             next_uxs[i] = ux + dt*dt_ux;

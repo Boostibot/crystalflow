@@ -128,6 +128,7 @@ static __global__ void cuda_produce_reduce_kernel(T* __restrict__ output, Produc
 #include <cuda_occupancy.h>
 #include <cuda_runtime.h>
 
+#if USE_CUDA == 1
 template <typename T, class Reduction, typename Producer, bool has_trivial_producer>
 static T cuda_produce_reduce(csize N, Producer produce, Reduction reduce_dummy, Cuda_Launch_Params launch_params, csize cpu_reduce)
 {
@@ -186,8 +187,7 @@ static T cuda_produce_reduce(csize N, Producer produce, Reduction reduce_dummy, 
                     <<<launch.block_count, launch.block_size, launch.dynamic_shared_memory, launch_params.stream>>>(curr_output, curr_input, N_curr);
             }
 
-            CUDA_DEBUG_TEST(cudaGetLastError());
-            // CUDA_DEBUG_TEST(cudaDeviceSynchronize());
+            CUDA_DEBUG_TEST(cudaDeviceSynchronize());
 
             csize G = MIN(N_curr, (csize) launch.block_size* (csize)launch.block_count);
             csize N_next = DIV_CEIL(G, WARP_SIZE*WARP_SIZE); 
@@ -211,6 +211,43 @@ static T cuda_produce_reduce(csize N, Producer produce, Reduction reduce_dummy, 
     }
 
     return reduced;
+}
+#else
+template <typename T, class Reduction, typename Producer, bool has_trivial_producer>
+static T cuda_produce_reduce(csize n, Producer produce, Reduction reduce_dummy, Cuda_Launch_Params launch_params, csize cpu_reduce)
+{
+    T sum = _reduce_indentity<Reduction, T>();
+    if(n > 0)
+    {
+        T* copy = (T*) malloc((size_t)n*sizeof(T));
+        for(csize i = 0; i < n; i++) {
+            if constexpr(has_trivial_producer)
+                copy[i] = produce[i];
+            else 
+                copy[i] = produce(i);
+        }
+
+        for(csize range = n; range > 1; range /= 2) {
+            for(csize i = 0; i < range/2 ; i ++)
+                copy[i] = _reduce_reduce<Reduction, T>(copy[2*i], copy[2*i + 1]);
+
+            if(range%2)
+                copy[range/2 - 1] = _reduce_reduce<Reduction, T>(copy[range/2 - 1], copy[range - 1]);
+        }
+
+        sum = copy[0];
+        free(copy);
+    }
+
+    return sum;
+}
+#endif
+
+template<class Reduction, typename T>
+static T cuda_produce_reduce(const T *input, csize n, Reduction reduce_tag = Reduction())
+{
+    T sum = _reduce_indentity<Reduction, T>();
+    return sum;
 }
 
 //============================== IMPLEMENTATION OF MORE SPECIFIC REDUCTIONS ===================================

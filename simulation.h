@@ -10,6 +10,7 @@
     typedef double Sim_Real;
 #endif
 
+typedef int csize;
 typedef uint16_t Sim_Flags;
 
 typedef enum Sim_Solver_Type{
@@ -19,36 +20,37 @@ typedef enum Sim_Solver_Type{
 } Sim_Solver_Type;
 
 enum {
-    SIM_SET_UX    = 1 << 0,
-    SIM_SET_DX_UX = 1 << 1,
-    SIM_SET_DY_UX = 1 << 2,
+    SIM_SET_VAL_RO = 1 << 0,
+    SIM_SET_VAL_UX = 1 << 1,
+    SIM_SET_VAL_UY = 1 << 2,
 
-    SIM_SET_UY    = 1 << 3,
-    SIM_SET_DX_UY = 1 << 4,
-    SIM_SET_DY_UY = 1 << 5,
-
-    SIM_SET_RHO    = 1 << 6,
-    SIM_SET_DX_RHO = 1 << 7,
-    SIM_SET_DY_RHO = 1 << 8,
+    SIM_SET_DER_RO = 1 << 3,
+    SIM_SET_DER_UX = 1 << 4,
+    SIM_SET_DER_UY = 1 << 5,
 
     SIM_SET_VALS = 0
-        | SIM_SET_UX
-        | SIM_SET_UY
-        | SIM_SET_RHO,
+        | SIM_SET_VAL_UX
+        | SIM_SET_VAL_UY
+        | SIM_SET_VAL_RO,
 
     SIM_SET_DERS = 0
-        | SIM_SET_DX_UX | SIM_SET_DY_UX
-        | SIM_SET_DX_UY | SIM_SET_DY_UY
-        | SIM_SET_DX_RHO | SIM_SET_DY_RHO,
+        | SIM_SET_DER_UX
+        | SIM_SET_DER_UY
+        | SIM_SET_DER_RO,
 
+    SIM_OUTSIDE_WALL = 1 << 6,
     SIM_DONT_SIMULATE = 1 << 15,
+};
+
+enum {
+    SIM_OUTSIDE_CELL = 1,
 };
 
 typedef struct Sim_Mut_State {
     int32_t nx;
     int32_t ny;
 
-    Sim_Real* rho;
+    Sim_Real* ro;
     Sim_Real* ux;
     Sim_Real* uy;
 } Sim_Mut_State;
@@ -66,31 +68,58 @@ typedef struct Sim_Norms {
     char name[128];
 } Sim_Norms;
 
+typedef struct Sim_Vars {
+    Sim_Real ro;
+    Sim_Real ux;
+    Sim_Real uy;
+} Sim_Vars;
+
+typedef struct Sim_Vars_And_Flags {
+    Sim_Flags flags;
+    Sim_Real ro;
+    Sim_Real ux;
+    Sim_Real uy;
+} Sim_Vars_And_Flags;
+
+typedef struct Sim_Face_Values {
+    Sim_Flags flags;
+    Sim_Vars average;
+    Sim_Vars upwind;
+    Sim_Vars der_x;
+    Sim_Vars der_y;
+} Sim_Face_Values;
+
 typedef struct Sim_Const_State {
     int32_t nx;
     int32_t ny;
 
     //TODO: compress?
-    Sim_Flags* flags;
-    Sim_Real* set_rho;
-    Sim_Real* set_ux;
-    Sim_Real* set_uy;
+    Sim_Flags* cell_flags;
+    Sim_Flags* face_x_flags;
+    Sim_Flags* face_y_flags;
 
-    Sim_Real* set_dx_rho;
-    Sim_Real* set_dx_ux;
-    Sim_Real* set_dx_uy;
+    Sim_Real* face_x_set_val_ro;
+    Sim_Real* face_x_set_val_ux;
+    Sim_Real* face_x_set_val_uy;
 
-    Sim_Real* set_dy_rho;
-    Sim_Real* set_dy_ux;
-    Sim_Real* set_dy_uy;
+    Sim_Real* face_x_set_der_ro;
+    Sim_Real* face_x_set_der_ux;
+    Sim_Real* face_x_set_der_uy;
+
+    Sim_Real* face_y_set_val_ro;
+    Sim_Real* face_y_set_val_ux;
+    Sim_Real* face_y_set_val_uy;
+    
+    Sim_Real* face_y_set_der_ro;
+    Sim_Real* face_y_set_der_ux;
+    Sim_Real* face_y_set_der_uy;
 
     Sim_Debug_Map* debug_maps;
     int32_t debug_maps_count;
     int32_t debug_maps_capacity;
 
-    Sim_Norms norms[32];
-    int32_t norms_count;
-    int32_t norms_capacity;
+    Sim_Face_Values* face_x_values;
+    Sim_Face_Values* face_y_values;
 } Sim_Const_State; 
 
 typedef struct Sim_Params {
@@ -144,15 +173,18 @@ static const char* solver_type_to_cstring(Sim_Solver_Type type)
     }
 }
 
-typedef struct Sim_Flow_Vertex {
+typedef struct Sim_Color_Vertex {
     float x;
     float y;
     uint32_t packed_color;
-} Sim_Flow_Vertex;
+} Sim_Color_Vertex;
 
 typedef struct Draw_Lines_Config {
     isize nx;
     isize ny;
+    float dx;
+    float dy;
+
     isize pix_size;
 
     float scale;
@@ -165,8 +197,31 @@ typedef struct Draw_Lines_Config {
     uint32_t rgba_i0;
     uint32_t rgba_i1;
 
-    float dx;
-    float dy;
 } Draw_Lines_Config;
 
-extern "C" bool sim_make_flow_vertices(Sim_Flow_Vertex* vertices, Sim_Real* uxs, Sim_Real* uys, Draw_Lines_Config config);
+typedef struct Strided_2D_Span {
+    void* data;
+    csize nx;
+    csize ny;
+
+    csize stride;
+    csize pitch;
+} Strided_2D_Span;
+
+typedef struct Draw_Walls_Params {
+    bool is_x_dir;
+    bool use_static_color;
+
+    float dx;
+    float dy;
+    float line_width;
+    float min_val;
+    float max_val;
+    uint32_t static_color;
+} Draw_Walls_Params;
+
+extern "C" bool sim_make_flow_vertices(Sim_Color_Vertex* vertices, isize* out_count, isize capacity, Sim_Real* uxs, Sim_Real* uys, Draw_Lines_Config config);
+extern "C" bool sim_make_face_vertices(Sim_Color_Vertex* vertices, isize* out_count, isize capacity, Strided_2D_Span face_values, Draw_Walls_Params params);
+extern "C" bool sim_make_face_vertices_flagged(
+    Sim_Color_Vertex* vertices, isize* out_count, isize capacity, 
+    Strided_2D_Span face_values, Strided_2D_Span face_flags, Sim_Flags flags_mask, Draw_Walls_Params params);

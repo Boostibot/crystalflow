@@ -4,14 +4,9 @@
 #include "assert.h"
 
 void gl_init(void* load_function);
-void draw_sci_texture(unsigned texture, float min, float max);
-void draw_sci_cuda_memory(const char* name, int width, int height, float min, float max, bool linear_filtering, const float* cuda_memory);
+void draw_colormap(int width, int height, float min, float max, bool linear_filtering, const Real* cuda_memory, const Sim_Flags* flags_or_null);
 
-#ifdef NO_GL
-void gl_init(void* load_function) {}
-void draw_sci_texture(unsigned texture, float min, float max) {}
-void draw_sci_cuda_memory(const char* name, int width, int height, float min, float max, bool linear_filtering, const float* cuda_memory) {}
-#else
+#if 1
 
 #define GLAD_GL_IMPLEMENTATION
 #include "external/glad/glad.h"
@@ -180,7 +175,7 @@ unsigned compile_shader(const char* vertex_shader_source, const char* frag_shade
         return shaderProgram;
 }
 
-void render_screen_quad()
+void draw_screen_quad()
 {
     static unsigned quadVAO = 0;
     static unsigned quadVBO = 0;
@@ -207,12 +202,17 @@ void render_screen_quad()
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void draw_sci_texture(unsigned texture, float min, float max)
+void draw_gl_colormap(unsigned texture, unsigned flags_map, uint32_t flagged_mask, uint32_t flagged_color, float min, float max, float view[4][4], float model[4][4])
 {
-    #define MIN_LOCATION 1
-    #define MAX_LOCATION 2
-    #define TEX_LOCATION 3
-    #define TEXTURE_BINDING 0
+    enum { MIN_LOCATION = 1 };
+    enum { MAX_LOCATION = 2 };
+    enum { TEX_LOCATION = 3 };
+    enum { FLAGS_LOCATION = 4 };
+    enum { FLAGS_MASK_LOCATION = 5 };
+    enum { FLAGS_COLOR_LOCATION = 6 };
+
+    enum { TEXTURE_BINDING = 0 };
+    enum { FLAGS_BINDING = 1 };
 
     static bool shader_error = false;
     static unsigned sci_shader = 0;
@@ -225,7 +225,10 @@ void draw_sci_texture(unsigned texture, float min, float max)
             layout (location = 1) uniform float _min; //MIN_LOCATION
             layout (location = 2) uniform float _max; //MAX_LOCATION
             layout (location = 3) uniform sampler2D tex; //TEX_LOCATION
-            
+            layout (location = 4) uniform usampler2D flags; //FLAGS_LOCATION
+            layout (location = 5) uniform uint flags_mask; //FLAGS_MASK_LOCATION
+            layout (location = 6) uniform uint flags_color; //FLAGS_MASK_LOCATION
+
             out vec4 color;
             in vec2 uv;
 
@@ -235,8 +238,17 @@ void draw_sci_texture(unsigned texture, float min, float max)
             {
                 float minVal = _min;
                 float maxVal = _max;
-
                 vec2 reverse_uv = vec2(uv.x, uv.y);
+
+                if(flags_mask != 0 && (int(texture(flags, reverse_uv).r) & int(flags_mask)) != 0) {
+                    int r = (int(flags_color) >> 16) & int(0xFF);
+                    int g = (int(flags_color) >> 8) & int(0xFF);
+                    int b = (int(flags_color) >> 0) & int(0xFF);
+                    int a = 255 - (int(flags_color) >> 24) & int(0xFF);
+                    color = vec4(r/255.0, g/255.0, b/255.0, a/255.0);
+                    return;
+                }
+
                 vec3 texCol = texture(tex, reverse_uv).rgb;      
                 float val = texCol.r;
                 if(isnan(val))
@@ -245,20 +257,19 @@ void draw_sci_texture(unsigned texture, float min, float max)
                 }
                 else if(val < minVal)
                 {
+                    //Shades from dark gray to black
                     float display = (1 - atan(minVal - val)/PI*2)*0.3;
                     color = vec4(display, display, display, 1.0);
-                    //Shades from dark gray to black
-
                 }
                 else if(val > maxVal)
                 {
+                    //Shades from bright gray to white
                     float display = (atan(val - minVal)/PI*2*0.3 + 0.7);
                     color = vec4(display, display, display, 1.0);
-                    //Shades from bright gray to white
                 }
                 else
                 {
-                    //Spectreum blue -> cyan -> green -> yellow -> red
+                    //Spectrum blue -> cyan -> green -> yellow -> red
 
                     val = min(max(val, minVal), maxVal- 0.0001);
                     float d = maxVal - minVal;
@@ -275,8 +286,6 @@ void draw_sci_texture(unsigned texture, float min, float max)
                         case 3 : r = 1.0; g = 1.0 - s; b = 0.0; break;
                     }
                     
-                    //color = vec4(val, val, val, 1.0);
-
                     color = vec4(r, g, b, 1.0);
                 }
             }
@@ -305,42 +314,31 @@ void draw_sci_texture(unsigned texture, float min, float max)
     {
 	    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glActiveTexture(GL_TEXTURE0 + TEXTURE_BINDING);
-        glBindTexture(GL_TEXTURE_2D, texture);
-    
         glUseProgram(sci_shader);
-        glUniform1f(MIN_LOCATION, min);
-        glUniform1f(MAX_LOCATION, max);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glActiveTexture(GL_TEXTURE0 + TEXTURE_BINDING);
         glUniform1i(TEX_LOCATION, TEXTURE_BINDING);
 
-	    render_screen_quad();
-    }
-
+        if(flagged_mask) {
+            glBindTexture(GL_TEXTURE_2D, flags_map);
+            glActiveTexture(GL_TEXTURE0 + FLAGS_BINDING);
+            glUniform1i(FLAGS_LOCATION, FLAGS_BINDING);
+            glUniform1ui(FLAGS_COLOR_LOCATION, flagged_color);
+        }
     
-    #undef MIN_LOCATION
-    #undef MAX_LOCATION
-    #undef TEX_LOCATION
-    #undef TEXTURE_BINDING
+        glUniform1f(MIN_LOCATION, min);
+        glUniform1f(MAX_LOCATION, max);
+        glUniform1ui(FLAGS_MASK_LOCATION, flagged_mask);
+
+	    draw_screen_quad();
+    }
 }
 
-#define MAX_VERTICES 6*1024*1024
-
-void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lines_Config config)
+#include "cuda_util.cuh"
+void draw_vertices(Sim_Color_Vertex* cuda_vertices, isize count, float view[4][4], float model[4][4])
 {
-    isize count = config.nx*config.ny;
-    static Sim_Flow_Vertex* cuda_vertices = NULL;
-    static Sim_Flow_Vertex* cpu_vertices = NULL;
-    static isize allocated_count = 0;
-    if(allocated_count < count) {
-        free(cpu_vertices);
-        cpu_vertices = (Sim_Flow_Vertex*) malloc((size_t) count*6*sizeof(Sim_Flow_Vertex));
-
-        cudaFree(cuda_vertices);
-        cudaMalloc(&cuda_vertices, (size_t) count*6*sizeof(Sim_Flow_Vertex));
-
-        allocated_count = count;
-    }
-
+    enum {MAX_VERTICES = 1024*512*3};
+    
     static GLuint VBO = 0;
     static GLuint VAO = 0;
     static GLuint shader = 0;
@@ -350,10 +348,10 @@ void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lin
         glBindVertexArray(VAO);
 
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES*sizeof(Sim_Flow_Vertex), NULL, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES*sizeof(Sim_Color_Vertex), NULL, GL_DYNAMIC_DRAW);
 
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Sim_Flow_Vertex), (void*) offsetof(Sim_Flow_Vertex, x));
-        glVertexAttribPointer(1, 1, GL_INT, GL_FALSE, sizeof(Sim_Flow_Vertex), (void*) offsetof(Sim_Flow_Vertex, packed_color));
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Sim_Color_Vertex), (void*) offsetof(Sim_Color_Vertex, x));
+        glVertexAttribIPointer(1, 1, GL_INT, sizeof(Sim_Color_Vertex), (void*) offsetof(Sim_Color_Vertex, packed_color));
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(1);
 
@@ -384,7 +382,8 @@ void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lin
                 int r = (a_color >> 16) & int(0xFF);
                 int g = (a_color >> 8) & int(0xFF);
                 int b = (a_color >> 0) & int(0xFF);
-                int a = 255 - (a_color >> 24) & int(0xFF);
+                int a = 255 - ((a_color >> 24) & int(0xFF));
+                a = 255;
                 v_color = vec4(r/255.0, g/255.0, b/255.0, a/255.0);
                 gl_Position = vec4(a_pos, 1, 1);
             }
@@ -393,63 +392,182 @@ void draw_flow_arrows(const char* name, Real* cuda_uxs, Real* cuda_uys, Draw_Lin
         shader = compile_shader(vertex_shader_source, frag_shader_source);
     }
 
-    sim_make_flow_vertices(cuda_vertices, cuda_uxs, cuda_uys, config);
-    sim_modify(cuda_vertices, cpu_vertices, (size_t) count*6*sizeof(Sim_Flow_Vertex), MODIFY_DOWNLOAD);
+    Sim_Color_Vertex* cpu_vertices = (Sim_Color_Vertex*) malloc((size_t) count*sizeof(Sim_Color_Vertex));
+    cudaMemcpy(cpu_vertices, cuda_vertices, (size_t) count*sizeof(Sim_Color_Vertex), cudaMemcpyDeviceToHost);
 
-    isize copy_size = MIN(count*6, MAX_VERTICES);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLuint) copy_size*sizeof(Sim_Flow_Vertex), cpu_vertices);
     glBindVertexArray(VAO);
     glUseProgram(shader); 
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei) copy_size);
+    for(isize i = 0; i < count; i += MAX_VERTICES)
+    {
+        isize copy_size = MIN(count - i, MAX_VERTICES);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLuint) copy_size*sizeof(Sim_Color_Vertex), cpu_vertices);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei) copy_size);
+    }
+    free(cpu_vertices);
 }
 
-void draw_sci_cuda_memory(const char* name, int width, int height, float min, float max, bool linear_filtering, const Real* cuda_memory)
+static Sim_Color_Vertex* g_cuda_vertices = NULL;
+static isize g_cuda_vertices_count = 1024*1024;
+
+void draw_flow_arrows(Real* cuda_uxs, Real* cuda_uys, Draw_Lines_Config config)
 {
-    enum { MAX_CUDA_GRAPHIC_RESOURCES = 16 };
+    if(g_cuda_vertices == NULL) 
+        CUDA_TEST(cudaMalloc(&g_cuda_vertices, (size_t) g_cuda_vertices_count*6*sizeof(Sim_Color_Vertex)));
+
+    //TODO: per batch operation
+    isize count = 0;
+    sim_make_flow_vertices(g_cuda_vertices, &count, g_cuda_vertices_count, cuda_uxs, cuda_uys, config);
+    draw_vertices(g_cuda_vertices, count, NULL, NULL);
+}
+
+void draw_face_values(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, isize member_offset, isize nx, isize ny, float width, float min_value, float max_value)
+{
+    if(g_cuda_vertices == NULL) 
+        CUDA_TEST(cudaMalloc(&g_cuda_vertices, (size_t) g_cuda_vertices_count*6*sizeof(Sim_Color_Vertex)));
+
+    Strided_2D_Span faces_x_span = {0};
+    faces_x_span.data = (uint8_t*) faces_x + member_offset;
+    faces_x_span.nx = nx + 1;
+    faces_x_span.ny = ny;
+    faces_x_span.stride = sizeof *faces_x;
+    faces_x_span.pitch = faces_x_span.nx*(isize) sizeof *faces_x;
+
+    Strided_2D_Span faces_y_span = {0};
+    faces_y_span.data = (uint8_t*) faces_y + member_offset;
+    faces_y_span.nx = nx;
+    faces_y_span.ny = ny + 1;
+    faces_y_span.stride = sizeof *faces_y;
+    faces_y_span.pitch = faces_y_span.nx*(isize) sizeof *faces_y;
+
+    Draw_Walls_Params walls_config_x = {0};
+    walls_config_x.is_x_dir = true;
+    walls_config_x.dx = 1.0f/nx;
+    walls_config_x.dy = 1.0f/ny;
+    walls_config_x.line_width = width;
+    walls_config_x.min_val = min_value;
+    walls_config_x.max_val = max_value;
+
+    Draw_Walls_Params walls_config_y = walls_config_x;
+    walls_config_y.is_x_dir = false;
+
+    isize count = 0;
+    sim_make_face_vertices(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, walls_config_x);
+    draw_vertices(g_cuda_vertices, count, NULL, NULL);
+    sim_make_face_vertices(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, walls_config_y);
+    draw_vertices(g_cuda_vertices, count, NULL, NULL);
+}
+
+void draw_walls(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, uint32_t intake_color, uint32_t outake_color, uint32_t wall_color, isize nx, isize ny, float width)
+{
+    if(g_cuda_vertices == NULL) 
+        CUDA_TEST(cudaMalloc(&g_cuda_vertices, (size_t) g_cuda_vertices_count*6*sizeof(Sim_Color_Vertex)));
+
+    Strided_2D_Span faces_x_span = {0};
+    faces_x_span.data = (uint8_t*) faces_x + offsetof(Sim_Face_Values, average.ro);;
+    faces_x_span.nx = nx + 1;
+    faces_x_span.ny = ny;
+    faces_x_span.stride = sizeof *faces_x;
+    faces_x_span.pitch = faces_x_span.nx*(isize) sizeof *faces_x;
+
+    Strided_2D_Span faces_y_span = {0};
+    faces_y_span.data = (uint8_t*) faces_y + offsetof(Sim_Face_Values, average.ro);
+    faces_y_span.nx = nx;
+    faces_y_span.ny = ny + 1;
+    faces_y_span.stride = sizeof *faces_y;
+    faces_y_span.pitch = faces_y_span.nx*(isize) sizeof *faces_y;
+
+    Strided_2D_Span flags_x_span = faces_x_span;
+    flags_x_span.data = (uint8_t*) faces_x + offsetof(Sim_Face_Values, flags);
+
+    Strided_2D_Span flags_y_span = faces_y_span;
+    flags_y_span.data = (uint8_t*) faces_y + offsetof(Sim_Face_Values, flags);
+
+    Sim_Flags intake_flags = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    Sim_Flags outake_flags = SIM_SET_VAL_RO | SIM_SET_DER_UX | SIM_SET_DER_UY;
+
+    Draw_Walls_Params walls_config_base = {0};
+    walls_config_base.is_x_dir = true;
+    walls_config_base.dx = 1.0f/nx;
+    walls_config_base.dy = 1.0f/ny;
+    walls_config_base.line_width = width;
+    walls_config_base.min_val = 0;
+    walls_config_base.max_val = 1;
+    walls_config_base.use_static_color = true;
+
+    /*
+    marking of outside cells
+    adding decorative flags
+    drawing of wall types
+    zooming in and out/panning
+    
+    */
+
+    Draw_Walls_Params walls_config_x_intake = walls_config_base;
+    walls_config_x_intake.is_x_dir = true;
+    walls_config_x_intake.static_color = intake_color;
+
+    Draw_Walls_Params walls_config_x_outake = walls_config_base;
+    walls_config_x_outake.is_x_dir = true;
+    walls_config_x_outake.static_color = outake_color;
+    
+    Draw_Walls_Params walls_config_y_intake = walls_config_base;
+    walls_config_y_intake.is_x_dir = false;
+    walls_config_y_intake.static_color = intake_color;
+
+    Draw_Walls_Params walls_config_y_outake = walls_config_base;
+    walls_config_y_outake.is_x_dir = false;
+    walls_config_y_outake.static_color = outake_color;
+
+    isize count = 0;
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, intake_flags, walls_config_x_intake);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, outake_flags, walls_config_x_outake);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, intake_flags, walls_config_y_intake);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, outake_flags, walls_config_y_outake);
+    draw_vertices(g_cuda_vertices, count, NULL, NULL);
+}
+
+void draw_colormap(int width, int height, float min, float max, bool linear_filtering, const Real* cuda_memory, const Sim_Flags* flags_or_null)
+{
+    enum { MAX_TEXTURES = 32 };
+    enum { TYPE_VALUE, TYPE_FLAG };
     typedef struct {
         int width;
         int height;
-        const char* name;
+        int type;
         GLuint handle;
-
-        void* cpu_memory;
     } Texture;
 
-    static Texture textures[MAX_CUDA_GRAPHIC_RESOURCES] = {0}; 
-    static int used_texture_count = 0;
+    static Texture g_textures[MAX_TEXTURES] = {0}; 
+    static int    g_used_texture_count = 0;
+    static void*  g_cpu_memory = NULL;
+    static size_t g_cpu_memory_size = 0;
 
-    size_t pixel_count = (size_t) width * (size_t) height;
-    size_t byte_count = pixel_count * sizeof(float);
-
-    int resource_index = -1;
-    for(int i = 0; i < used_texture_count; i++)
+    int val_tex_index = -1;
+    int flag_tex_index = -1;
     {
-        if(textures[i].width == width && textures[i].height == height && strcmp(textures[i].name, name) == 0)
-        {
-            resource_index = i;
-            break;
-        }
-    }
+        for(int i = 0; i < g_used_texture_count; i++)
+            if(g_textures[i].width == width && g_textures[i].height == height && g_textures[i].type == TYPE_VALUE) {
+                val_tex_index = i;
+                break;
+            }
 
-    if(resource_index == -1)
-    {
-        if(used_texture_count >= MAX_CUDA_GRAPHIC_RESOURCES)
+        if(val_tex_index == -1)
         {
-            LOG_ERROR("opengl", "too many curently managed cuda resources!");
-            return;
-        }
-        else
-        {
+            if(g_used_texture_count >= MAX_TEXTURES)
+            {
+                LOG_ERROR("opengl", "too many curently managed cuda resources!");
+                return;
+            }
+
             //Create a new texture and register it as cuda resource
-            Texture texture = {width, height, name};
-
+            Texture texture = {width, height, TYPE_VALUE};
             glGenTextures(1, &texture.handle);
             glBindTexture(GL_TEXTURE_2D, texture.handle);
 
             glTexImage2D(
                 GL_TEXTURE_2D,
-                0, 
+                0,
                 GL_R32F, // internal format
                 width, 
                 height, 
@@ -464,21 +582,82 @@ void draw_sci_cuda_memory(const char* name, int width, int height, float min, fl
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear_filtering ? GL_LINEAR : GL_NEAREST);
             glGenerateMipmap(GL_TEXTURE_2D);
 
-            texture.cpu_memory = malloc(byte_count);
-
-            resource_index = used_texture_count++;
-            textures[resource_index] = texture;
+            val_tex_index = g_used_texture_count++;
+            g_textures[val_tex_index] = texture;
         }
     }
 
-    //cudaGraphicsGLRegisterImage kept failing with "unknown error" on MX450 on ubuntu. 
-    // Because of this we do this incredibly inefficient copy to host memory and back to device through opengl call.
-    Texture texture = textures[resource_index];
-    sim_modify_float((Real*) cuda_memory, (float*) texture.cpu_memory, pixel_count, MODIFY_DOWNLOAD);
+    if(flags_or_null) {
+        for(int i = 0; i < g_used_texture_count; i++)
+            if(g_textures[i].width == width && g_textures[i].height == height && g_textures[i].type == TYPE_FLAG) {
+                flag_tex_index = i;
+                break;
+            }
 
-    glBindTexture(GL_TEXTURE_2D, texture.handle);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_FLOAT, texture.cpu_memory);
-    draw_sci_texture((unsigned) texture.handle, min, max);
+        if(flag_tex_index == -1)
+        {
+            if(g_used_texture_count >= MAX_TEXTURES)
+            {
+                LOG_ERROR("opengl", "too many curently managed cuda resources!");
+                return;
+            }
+
+            //Create a new texture and register it as cuda resource
+            Texture texture = {width, height, TYPE_FLAG};
+            glGenTextures(1, &texture.handle);
+            glBindTexture(GL_TEXTURE_2D, texture.handle);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_R16UI, // internal format
+                width, 
+                height, 
+                0, 
+                GL_RED, // acess format
+                GL_UNSIGNED_SHORT, //data type
+                NULL);
+
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            flag_tex_index = g_used_texture_count++;
+            g_textures[flag_tex_index] = texture;
+        }
+    }
+
+    size_t pixel_count = (size_t) width * (size_t) height;
+    size_t required_bytes = MAX(pixel_count * sizeof(float), pixel_count * sizeof(Sim_Flags));
+    if(g_cpu_memory_size < required_bytes) {
+        g_cpu_memory_size = required_bytes;
+        g_cpu_memory = realloc(g_cpu_memory, g_cpu_memory_size);
+    }
+
+    unsigned val_texture_handle = (unsigned) -1;
+    unsigned flag_texture_handle = (unsigned) -1;
+    Sim_Flags flagged_mask = 0;
+    {
+        Texture val_texture = g_textures[val_tex_index];
+        sim_modify_float((Real*) cuda_memory, (float*) g_cpu_memory, pixel_count, MODIFY_DOWNLOAD);
+        glBindTexture(GL_TEXTURE_2D, val_texture.handle);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_FLOAT, g_cpu_memory);
+
+        val_texture_handle = (unsigned) val_texture.handle;
+    }
+
+    if(flags_or_null) {
+        Texture flag_texture = g_textures[flag_tex_index];
+        cudaMemcpy(g_cpu_memory, flags_or_null, pixel_count*sizeof(Sim_Flags), cudaMemcpyDeviceToHost);
+
+        // sim_modify_float((Real*) cuda_memory, (float*) g_cpu_memory, pixel_count, MODIFY_DOWNLOAD);
+        glBindTexture(GL_TEXTURE_2D, flag_texture.handle);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_UNSIGNED_SHORT, g_cpu_memory);
+        
+        flagged_mask = (Sim_Flags) -1;
+        flag_texture_handle = (unsigned) flag_texture.handle;
+    }
+
+    uint32_t flagged_color = 0xFFFFFF;
+    draw_gl_colormap(val_texture_handle, flag_texture_handle, flagged_mask, flagged_color, min, max, NULL, NULL);
 
     glFinish();
 }

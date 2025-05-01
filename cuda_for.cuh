@@ -84,6 +84,7 @@
 #include "cuda_device.cuh"
 #include "cuda_alloc.cuh"
 
+#if USE_CUDA == 1
 template <typename Function>
 static __global__ void cuda_for_kernel(csize from, csize item_count, Function func)
 {
@@ -108,9 +109,8 @@ static void cuda_for(csize from, csize to, Function func, Cuda_Launch_Params lau
         launch_params.preferd_block_size = 64;
     Cuda_Launch_Config launch = cuda_get_launch_config(to - from, bounds, launch_params);
 
-    CUDA_DEBUG_TEST(cudaGetLastError());
     cuda_for_kernel<<<launch.block_count, launch.block_size, launch.dynamic_shared_memory, launch_params.stream>>>(from, to-from, (Function&&) func);
-    CUDA_DEBUG_TEST(cudaGetLastError());
+    CUDA_DEBUG_TEST(cudaDeviceSynchronize());
 }
 
 template <typename Function>
@@ -124,14 +124,31 @@ static void cuda_for_2D(csize from_x, csize from_y, csize to_x, csize to_y, Func
     Cuda_Launch_Config launch = cuda_get_launch_config(volume, bounds, launch_params);
 
     cuda_for_2D_kernel<<<launch.block_count, launch.block_size, launch.dynamic_shared_memory, launch_params.stream>>>(from_x, to_x-from_x, from_y, to_y-from_y, (Function&&) func);
-    CUDA_DEBUG_TEST(cudaGetLastError());
+    CUDA_DEBUG_TEST(cudaDeviceSynchronize());
 }
+#else
+template <typename Function>
+static void cuda_for(csize from_x, csize to_x, Function func, Cuda_Launch_Params launch_params = {})
+{
+    for(csize x = from_x; x < to_x; x++)
+        func(x);
+}
+
+template <typename Function>
+static void cuda_for_2D(csize from_x, csize from_y, csize to_x, csize to_y, Function func, Cuda_Launch_Params launch_params = {})
+{
+    for(csize y = from_y; y < to_y; y++)
+        for(csize x = from_x; x < to_x; x++)
+            func(x, y);
+}
+#endif
 
 //========================================== TILED FOR =====================================
 enum {
     TILED_FOR_DYNAMIC_RANGE = -1 //Set the template arguments to this value to be able to specify the 'r' through function arguments 
 };
 
+#if USE_CUDA == 1
 template <typename T, typename Gather, typename Function, csize static_r>
 static void __global__ cuda_tiled_for_kernel(csize i_offset, csize N, csize dynamic_r, Gather gather, Function func)
 {
@@ -199,21 +216,7 @@ static void cuda_tiled_for(csize from_i, csize to_i, Gather gather, Function fun
 
     cuda_tiled_for_kernel<T, Gather, Function, static_r>
         <<<launch.block_count, launch.block_size, launch.dynamic_shared_memory, launch_params.stream>>>(from_i, N, dynamic_r, (Gather&&) gather, (Function&&) func);
-    CUDA_DEBUG_TEST(cudaGetLastError());
-}
-
-
-template <csize static_r, typename T, typename Function>
-static void cuda_tiled_for_bound(const T* data, csize from_i, csize to_i, Function func, csize dynamic_r = 0, T out_of_bounds_val = T(), Cuda_Launch_Params launch_params = {})
-{
-    //Gather is not offset!
-    const T* offset_data = data + from_i;
-    cuda_tiled_for<static_r, T, Function>(from_i, to_i, [=]SHARED(csize i, csize N, csize r){
-        if(0 <= i && i < N)
-            return offset_data[i];
-        else
-            return out_of_bounds_val;
-    }, (Function&&) func, dynamic_r, launch_params);
+    CUDA_DEBUG_TEST(cudaDeviceSynchronize());
 }
 
 template <typename T, typename Gather, typename Function, csize static_rx, csize static_ry>
@@ -321,8 +324,53 @@ static void cuda_tiled_for_2D(csize from_x, csize from_y, csize to_x, csize to_y
 
     cuda_tiled_for_2D_kernel<T, Gather, Function, static_rx, static_ry>
         <<<launch.block_count, block_size3, launch.dynamic_shared_memory, launch_params.stream>>>(from_x, from_y, nx, ny, dynamic_rx, dynamic_ry, (Gather&&) gather, (Function&&) func);
-    CUDA_DEBUG_TEST(cudaGetLastError());
+    CUDA_DEBUG_TEST(cudaDeviceSynchronize());
 }
+
+#else
+template <csize static_r, typename T, typename Function, typename Gather>
+static void cuda_tiled_for(csize from_i, csize to_i, Gather gather, Function func, csize dynamic_r = 0, Cuda_Launch_Params launch_params = {})
+{
+    constexpr csize rx = static_r;
+    static_assert(static_r != TILED_FOR_DYNAMIC_RANGE);
+
+    T tile[2*(size_t)rx + 1];
+    csize N = to_i - from_i;
+    for(csize x = from_i; x < to_i; x++) {
+
+        csize i = x - from_i;
+        for(csize ti = -rx; ti <= rx; ti++) 
+            tile[ti] = gather(i, N, rx);
+
+        func(x, rx, 2*rx + 1, tile);
+    }
+}
+
+template <csize static_rx, csize static_ry, typename T, typename Function, typename Gather>
+static void cuda_tiled_for_2D(csize from_x, csize from_y, csize to_x, csize to_y, Gather gather, Function func, csize dynamic_rx = 0, csize dynamic_ry = 0, Cuda_Launch_Params launch_params = {})
+{
+    constexpr csize rx = static_rx;
+    constexpr csize ry = static_ry;
+    static_assert(static_rx != TILED_FOR_DYNAMIC_RANGE);
+    static_assert(static_ry != TILED_FOR_DYNAMIC_RANGE);
+
+    T tile[2*(size_t) ry + 1][2*(size_t) rx + 1];
+    csize nx = to_x - from_x;
+    csize ny = to_y - from_y;
+    for(csize y = from_y; y < to_y; y++)
+        for(csize x = from_x; x < to_x; x++) {
+
+            for(csize ty = -ry; ty <= ry; ty++) 
+                for(csize tx = -rx; tx <= rx; tx++) {
+                    CHECK_BOUNDS(rx + tx, 2*rx + 1);
+                    CHECK_BOUNDS(ry + ty, 2*ry + 1);
+                    tile[ry + ty][rx + tx] = gather(tx + x-from_x, ty + y-from_y, nx, ny, rx, ry); //gather is not offset!
+                }
+                
+            func(x, y, rx, ry, 2*rx + 1, 2*ry + 1, (T*) tile);
+        }
+}
+#endif
 
 template <csize static_rx, csize static_ry, typename T, typename Function>
 static void cuda_tiled_for_2D_bound(const T* data, csize data_width, csize from_x, csize from_y, csize to_x, csize to_y, Function func, csize dynamic_rx = 0, csize dynamic_ry = 0, T out_of_bounds_val = T(), Cuda_Launch_Params launch_params = {})
@@ -337,6 +385,20 @@ static void cuda_tiled_for_2D_bound(const T* data, csize data_width, csize from_
                 return out_of_bounds_val;
         }, (Function&&) func, dynamic_rx, dynamic_ry, launch_params);
 }
+
+template <csize static_r, typename T, typename Function>
+static void cuda_tiled_for_bound(const T* data, csize from_i, csize to_i, Function func, csize dynamic_r = 0, T out_of_bounds_val = T(), Cuda_Launch_Params launch_params = {})
+{
+    //Gather is not offset!
+    const T* offset_data = data + from_i;
+    cuda_tiled_for<static_r, T, Function>(from_i, to_i, [=]SHARED(csize i, csize N, csize r){
+        if(0 <= i && i < N)
+            return offset_data[i];
+        else
+            return out_of_bounds_val;
+    }, (Function&&) func, dynamic_r, launch_params);
+}
+
 
 //================================================ TESTS ====================================================================
 #if (defined(TEST_CUDA_ALL) || defined(TEST_CUDA_FOR)) && !defined(TEST_CUDA_FOR_IMPL)

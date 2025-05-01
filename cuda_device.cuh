@@ -15,6 +15,9 @@ static Cuda_Info cuda_one_time_setup()
 {
     static bool was_setup = false;
     static Cuda_Info info = {0};
+    #if USE_CUDA == 0
+    return info;
+    #endif
     
     if(was_setup == false)
     {

@@ -15,6 +15,11 @@
 #include <device_launch_parameters.h>
 #include <cuda_runtime.h>
 
+#define USE_CUDA 0
+#ifndef USE_CUDA
+    #define USE_CUDA 1
+#endif
+
 // typedef int64_t csize;
 typedef int csize;
 #define isizeof(type) (csize) sizeof(type) 
@@ -119,3 +124,35 @@ static double benchmark(double time, Func func)
     return benchmark(time, time / 10.0, func);
 }
 
+static cudaError_t cudaMalloc_cpu(void* ptr, size_t size)
+{
+    void* out = malloc(size);
+    *(void**)ptr = out;
+    if(size != 0 && out == NULL)
+        return (cudaError_t) 1;
+    return (cudaError_t) 0;
+}
+static cudaError_t cudaFree_cpu(void* ptr)
+{
+    free(ptr);
+    return (cudaError_t) 0;
+}
+
+static cudaError_t cudaMemcpy_cpu(void* dest, const void* src, size_t size, int kind)
+{
+    memmove(dest, src, size);
+    return (cudaError_t) 0;
+}
+
+static cudaError_t cudaMemset_cpu(void* dest, int val, size_t size)
+{
+    memset(dest, val, size);
+    return (cudaError_t) 0;
+}
+
+#if USE_CUDA == 0
+    #define cudaMalloc cudaMalloc_cpu
+    #define cudaFree   cudaFree_cpu
+    #define cudaMemcpy cudaMemcpy_cpu
+    #define cudaMemset cudaMemset_cpu
+#endif

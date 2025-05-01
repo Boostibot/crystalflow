@@ -54,40 +54,52 @@ struct App_State {
 };
 
 typedef int64_t isize;
+
+struct Face_Indices {
+    isize e;
+    isize w;
+    isize n;
+    isize s;
+};
+
+static Face_Indices get_cell_face_indices(isize x, isize y, isize nx, isize ny)
+{
+    (void) ny;
+    Face_Indices faces = {0};
+    faces.w = x+0 + y*(nx + 1);
+    faces.e = x+1 + y*(nx + 1);
+    faces.s = x + (y+0)*nx;
+    faces.n = x + (y+1)*nx;
+    return faces;
+}
+
 void sim_set_wall_noslip_at(Sim_Const_State* cpu, int32_t x, int32_t y)
 {
     int32_t nx = cpu->nx;
     int32_t ny = cpu->ny;
-    CHECK_BOUNDS(x, nx);
-    CHECK_BOUNDS(y, ny);
-    for(int32_t dy = -1; dy <= 1; dy++)
-        for(int32_t dx = -1; dx <= 1; dx++)
-        {
-            int32_t cx = x + dx;
-            int32_t cy = y + dy;
-            if(0 <= cx && cx < nx)
-                if(0 <= cy && cy < ny)
-                {
-                    isize i = (isize) cx + (isize) cy*nx;
-                    cpu->flags[i] |= SIM_SET_UX | SIM_SET_UY;
-                    cpu->set_ux[i] = 0;
-                    cpu->set_uy[i] = 0;
-                }
-        }
-
     isize i = (isize) x + (isize) y*nx;
-    cpu->flags[i] |= SIM_SET_DERS | SIM_SET_VALS | SIM_DONT_SIMULATE;
-    cpu->set_rho[i] = 0;
-    cpu->set_ux[i] = 0;
-    cpu->set_uy[i] = 0;
+    cpu->cell_flags[i] = SIM_OUTSIDE_CELL;
 
-    cpu->set_dx_rho[i] = 0;
-    cpu->set_dx_ux[i] = 0;
-    cpu->set_dx_uy[i] = 0;
+    Face_Indices f = get_cell_face_indices(x, y, nx, ny);
+    cpu->face_x_flags[f.w] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    cpu->face_x_set_der_ro[f.w] = 0;
+    cpu->face_x_set_val_ux[f.w] = 0;
+    cpu->face_x_set_val_uy[f.w] = 0;
 
-    cpu->set_dy_rho[i] = 0;
-    cpu->set_dy_ux[i] = 0;
-    cpu->set_dy_uy[i] = 0;
+    cpu->face_x_flags[f.e] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    cpu->face_x_set_der_ro[f.e] = 0;
+    cpu->face_x_set_val_ux[f.e] = 0;
+    cpu->face_x_set_val_uy[f.e] = 0;
+
+    cpu->face_y_flags[f.s] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    cpu->face_y_set_der_ro[f.s] = 0;
+    cpu->face_y_set_val_ux[f.s] = 0;
+    cpu->face_y_set_val_uy[f.s] = 0;
+
+    cpu->face_y_flags[f.n] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    cpu->face_y_set_der_ro[f.n] = 0;
+    cpu->face_y_set_val_ux[f.n] = 0;
+    cpu->face_y_set_val_uy[f.n] = 0;
 }
 
 void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real outake, Real intake_rho, Real outake_rho, const Sim_Config& config)
@@ -97,7 +109,7 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
     double obstacle_x = config.region_width/3;
     double obstacle_y = config.region_height/2;
     double obstacle_diam2 = obstacle_diam*obstacle_diam;
-    double dx = config.region_width/cpu->nx;
+    // double dx = config.region_width/cpu->nx;
     double dy = config.region_height/cpu->ny;
 
     int32_t nx = cpu->nx;
@@ -117,35 +129,11 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
         }
     }
 
-    //0
-    //tlak vlna
-    //rychlost
-    
-    //0
-    //1
-    //2
-    //4
-    //9
-    //4
-    //2
-    //1
-    //0
 
-    int32_t intake_top = 3;
-    int32_t intake_bot = ny-3;
+    int32_t intake_top = 1;
+    int32_t intake_bot = ny-1;
     double intake_h = (intake_bot - intake_top)*dy;
     double intake_mid = (intake_bot + intake_top)*dy/2;
-    #if 1
-    //intake with fixed velocity, neumann density 
-    // for(int32_t y = 0; y < ny; y++) {
-    //     for(int32_t x = 0; x < 1; x++) {
-    //         isize i = (isize) x + (isize) y*nx;
-    //         cpu->flags[i] |= SIM_SET_VALS;
-    //         cpu->set_rho[i] = intake_rho;
-    //         cpu->set_ux[i] = 0;
-    //         cpu->set_uy[i] = 0;
-    //     }
-    // }
     for(int32_t y = intake_top; y < intake_bot; y++) {
         for(int32_t x = 0; x < 1; x++) {
             isize i = (isize) x + (isize) y*nx;
@@ -153,69 +141,55 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
             double parabola = (y_pos - intake_mid)/(intake_h/2);
             double factor = CLAMP((1 - parabola*parabola), 0, 1);
             double ux = intake*2*factor;
+            // ux = intake;
 
-            cpu->flags[i] = SIM_SET_UX | SIM_SET_UY | SIM_SET_DX_RHO | SIM_SET_DY_RHO;
-            if(x == 0)
-                cpu->flags[i] |= SIM_DONT_SIMULATE;
+            cpu->cell_flags[i] = SIM_OUTSIDE_CELL;
 
-            cpu->set_ux[i] = ux;
-            cpu->set_uy[i] = 0;
-            cpu->set_dx_rho[i] = 0;
-            cpu->set_dy_rho[i] = 0;
+            Face_Indices f = get_cell_face_indices(x, y, nx, ny);
+            cpu->face_x_flags[f.e] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+            cpu->face_x_set_der_ro[f.e] = 0;
+            cpu->face_x_set_val_ux[f.e] = ux;
+            cpu->face_x_set_val_uy[f.e] = 0;
         }
     }
 
     //outtake with neumann velocity, fixed pressure
     for(int32_t y = 0; y < ny; y++) {
         for(int32_t x = nx-1; x < nx; x++) {
-            isize i = (isize) x + (isize) y*nx;
-            cpu->flags[i] = (SIM_SET_DERS &~(SIM_SET_DX_RHO | SIM_SET_DY_RHO)) | SIM_SET_RHO;
-            if(x == nx-1)
-                cpu->flags[i] |= SIM_DONT_SIMULATE;
 
-            cpu->set_dx_ux[i] = 0;
-            cpu->set_dx_uy[i] = 0;
-            cpu->set_rho[i] = intake_rho;
-        }
-    }
-    #else
-    //intake with fixed velocity, neumann density 
-    for(int32_t y = 3; y < ny-3; y++) {
-        for(int32_t x = 0; x < 1; x++) {
             isize i = (isize) x + (isize) y*nx;
             double y_pos = (y + 0.5)*dy;
-            double factor = (y_pos - config.region_height/2)/(config.region_height/2);
-            double ux = intake*(1 - factor*factor);
+            double parabola = (y_pos - intake_mid)/(intake_h/2);
+            double factor = CLAMP((1 - parabola*parabola), 0, 1);
+            double ux = intake*2*factor;
+            // ux = intake;
 
-            cpu->flags[i] = SIM_SET_UX | SIM_SET_UY | SIM_SET_DX_RHO | SIM_SET_DY_RHO;
-            cpu->set_ux[i] = 0;
-            cpu->set_uy[i] = 0;
-            cpu->set_dx_rho[i] = 0;
-            cpu->set_dy_rho[i] = 0;
+            cpu->cell_flags[i] = SIM_OUTSIDE_CELL;
+
+            Face_Indices f = get_cell_face_indices(x, y, nx, ny);
+            cpu->face_x_flags[f.w] = SIM_SET_VAL_RO | SIM_SET_DER_UX | SIM_SET_DER_UY;
+            cpu->face_x_set_val_ro[f.w] = ux;
+            cpu->face_x_set_der_ux[f.w] = 0;
+            cpu->face_x_set_der_uy[f.w] = 0;
         }
     }
-
-    //outtake with neumann velocity, fixed pressure
-    for(int32_t y = 0; y < ny; y++) {
-        for(int32_t x = nx-1; x < nx; x++) {
-            isize i = (isize) x + (isize) y*nx;
-            cpu->flags[i] = (SIM_SET_DERS &~(SIM_SET_DX_RHO | SIM_SET_DY_RHO)) | SIM_SET_RHO;
-            cpu->set_dx_ux[i] = 0;
-            cpu->set_dx_uy[i] = 0;
-            cpu->set_rho[i] = 2;
-        }
-    }
-
-    #endif
 
     //set walls
-    for(int32_t y = 0; y < 2; y++)
+    for(int32_t y = 0; y < 1; y++)
         for(int32_t x = 0; x < nx; x++)
             sim_set_wall_noslip_at(cpu, x, y);
 
-    for(int32_t y = ny-2; y < ny; y++)
+    for(int32_t y = ny-1; y < ny; y++)
         for(int32_t x = 0; x < nx; x++)
             sim_set_wall_noslip_at(cpu, x, y);
+
+
+    // isize off = (nx + 1)*(ny - 1);
+    // for(isize i = 0; i < cpu->nx + 1; i++) 
+    //     printf("%i ", (int) cpu->face_x_flags[off + i]);
+    // printf("\n");
+
+    // int k = 0;
 }
 
 void sim_set_constant_initial_conditions(Sim_Mut_State* cpu, Real rho, Real ux, Real uy, const Sim_Config& config)
@@ -228,7 +202,7 @@ void sim_set_constant_initial_conditions(Sim_Mut_State* cpu, Real rho, Real ux, 
             isize i = (isize) x + (isize) y*nx;
             cpu->ux[i] = ux;
             cpu->uy[i] = uy;
-            cpu->rho[i] = rho;
+            cpu->ro[i] = rho;
         }
 }
 
@@ -238,7 +212,7 @@ Sim_Mut_State cpu_sim_mut_state_init(int32_t nx, int32_t ny)
     Sim_Mut_State state = {0};
     state.nx = nx;
     state.ny = ny;
-    state.rho = (Real*) calloc(1, bytes); 
+    state.ro = (Real*) calloc(1, bytes); 
     state.ux = (Real*) calloc(1, bytes); 
     state.uy = (Real*) calloc(1, bytes); 
     return state;
@@ -246,46 +220,44 @@ Sim_Mut_State cpu_sim_mut_state_init(int32_t nx, int32_t ny)
 
 void cpu_sim_mut_state_deinit(Sim_Mut_State* state)
 {
-    free(state->rho);
+    free(state->ro);
     free(state->ux);
     free(state->uy);
     memset(state, 0, sizeof *state);
 }
 
-Sim_Const_State cpu_sim_const_state_init(int32_t nx, int32_t ny)
+void cpu_sim_const_state_init(Sim_Const_State* state, int32_t nx, int32_t ny)
 {
-    size_t bytes = (size_t) nx* (size_t) ny*sizeof(Real);
-    Sim_Const_State state = {0};
-    state.nx = nx;
-    state.ny = ny;
-    state.flags = (Sim_Flags*) calloc(1, (size_t) nx* (size_t) ny*sizeof(Sim_Flags)); 
-    state.set_rho = (Real*) calloc(1, bytes); 
-    state.set_ux = (Real*) calloc(1, bytes); 
-    state.set_uy = (Real*) calloc(1, bytes); 
+    state->nx = nx;
+    state->ny = ny;
+    size_t cells = (size_t) nx * (size_t) ny;
+    size_t faces_x = (size_t) (nx+1) * (size_t) ny; 
+    size_t faces_y = (size_t) nx * (size_t) (ny+1); 
 
-    state.set_dx_rho = (Real*) calloc(1, bytes); 
-    state.set_dx_ux = (Real*) calloc(1, bytes); 
-    state.set_dx_uy = (Real*) calloc(1, bytes); 
+    state->cell_flags = (Sim_Flags*) calloc(1, cells * sizeof(Sim_Flags));
+    state->face_x_flags = (Sim_Flags*) calloc(1, cells * sizeof(Sim_Flags));
+    state->face_y_flags = (Sim_Flags*) calloc(1, cells * sizeof(Sim_Flags));
 
-    state.set_dy_rho = (Real*) calloc(1, bytes); 
-    state.set_dy_ux = (Real*) calloc(1, bytes); 
-    state.set_dy_uy = (Real*) calloc(1, bytes); 
-    return state;
+    state->face_x_set_val_ro = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+    state->face_x_set_val_ux = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+    state->face_x_set_val_uy = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+
+    state->face_x_set_der_ro = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+    state->face_x_set_der_ux = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+    state->face_x_set_der_uy = (Sim_Real*) calloc(1, faces_x * sizeof(Sim_Real));
+
+    state->face_y_set_val_ro = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
+    state->face_y_set_val_ux = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
+    state->face_y_set_val_uy = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
+    
+    state->face_y_set_der_ro = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
+    state->face_y_set_der_ux = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
+    state->face_y_set_der_uy = (Sim_Real*) calloc(1, faces_y * sizeof(Sim_Real));
 }
 
 void cpu_sim_const_state_deinit(Sim_Const_State* state)
 {
-    free(state->set_rho);
-    free(state->set_ux);
-    free(state->set_uy);
-
-    free(state->set_dx_rho);
-    free(state->set_dx_ux);
-    free(state->set_dx_uy);
-
-    free(state->set_dy_rho);
-    free(state->set_dy_ux);
-    free(state->set_dy_uy);
+    ASSERT(false);
     memset(state, 0, sizeof *state);
 }
 
@@ -323,7 +295,7 @@ void simulation_state_deinit(App_State* app)
 void simulation_state_init(App_State* app, Sim_Config config)
 {
     app->config = std::move(config);
-    app->cpu_const_state = cpu_sim_const_state_init(app->config.nx, app->config.ny);
+    cpu_sim_const_state_init(&app->cpu_const_state, app->config.nx, app->config.ny);
     app->cpu_mut_state = cpu_sim_mut_state_init(app->config.nx, app->config.ny);
 
     sim_const_state_init(&app->gpu_const_state, app->config.nx, app->config.ny);
@@ -510,7 +482,6 @@ int main(int argc, char** argv)
         double poll_last_time = 0;
 
         double processing_time = 0;
-        double rendering_time = 0;
         double acumulated_processing_time = 0;
 
         int snapshot_every_i = 0;
@@ -522,7 +493,7 @@ int main(int argc, char** argv)
         sim_set_boundary_conditions_tube(&app->cpu_const_state, app->config.intake_t0_ux, app->config.intake_t0_ux, app->config.intake_t0_rho, app->config.intake_t0_rho, app->config);
         {
             size_t bytes = (size_t) app->config.nx * (size_t) app->config.ny * (size_t) sizeof(Real);
-            sim_modify(app->gpu_mut_states[1].rho, app->cpu_mut_state.rho, bytes, MODIFY_UPLOAD);
+            sim_modify(app->gpu_mut_states[1].ro, app->cpu_mut_state.ro, bytes, MODIFY_UPLOAD);
             sim_modify(app->gpu_mut_states[1].ux, app->cpu_mut_state.ux, bytes, MODIFY_UPLOAD);
             sim_modify(app->gpu_mut_states[1].uy, app->cpu_mut_state.uy, bytes, MODIFY_UPLOAD);
         }
@@ -569,22 +540,31 @@ int main(int argc, char** argv)
             {
                 sim_set_boundary_conditions_tube(&app->cpu_const_state, intake_ux, intake_ux, intake_rho, intake_rho, app->config);
 
-                size_t bytes = (size_t) app->config.nx * (size_t) app->config.ny * (size_t) sizeof(Real);
-                size_t bytes_flags = (size_t) app->config.nx * (size_t) app->config.ny * (size_t) sizeof(Sim_Flags);
+                isize nx = app->cpu_const_state.nx;
+                isize ny = app->cpu_const_state.ny;
+                size_t cells = (size_t) nx * (size_t) ny;
+                size_t faces_x = (size_t) (nx+1) * (size_t) ny; 
+                size_t faces_y = (size_t) nx * (size_t) (ny+1); 
                 
-                sim_modify(app->gpu_const_state.flags, app->cpu_const_state.flags, bytes_flags, MODIFY_UPLOAD);
+                cudaMemcpy(app->gpu_const_state.cell_flags, app->cpu_const_state.cell_flags, cells * sizeof(Sim_Flags), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_x_flags, app->cpu_const_state.face_x_flags, faces_x * sizeof(Sim_Flags), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_y_flags, app->cpu_const_state.face_y_flags, faces_y * sizeof(Sim_Flags), cudaMemcpyHostToDevice);
 
-                sim_modify(app->gpu_const_state.set_rho, app->cpu_const_state.set_rho, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_ux, app->cpu_const_state.set_ux, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_uy, app->cpu_const_state.set_uy, bytes, MODIFY_UPLOAD);
+                cudaMemcpy(app->gpu_const_state.face_x_set_val_ro, app->cpu_const_state.face_x_set_val_ro, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_x_set_val_ux, app->cpu_const_state.face_x_set_val_ux, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_x_set_val_uy, app->cpu_const_state.face_x_set_val_uy, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
 
-                sim_modify(app->gpu_const_state.set_dx_rho, app->cpu_const_state.set_dx_rho, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_dx_ux, app->cpu_const_state.set_dx_ux, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_dx_uy, app->cpu_const_state.set_dx_uy, bytes, MODIFY_UPLOAD);
+                cudaMemcpy(app->gpu_const_state.face_x_set_der_ro, app->cpu_const_state.face_x_set_der_ro, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_x_set_der_ux, app->cpu_const_state.face_x_set_der_ux, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_x_set_der_uy, app->cpu_const_state.face_x_set_der_uy, faces_x * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+
+                cudaMemcpy(app->gpu_const_state.face_y_set_val_ro, app->cpu_const_state.face_y_set_val_ro, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_y_set_val_ux, app->cpu_const_state.face_y_set_val_ux, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_y_set_val_uy, app->cpu_const_state.face_y_set_val_uy, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
                 
-                sim_modify(app->gpu_const_state.set_dy_rho, app->cpu_const_state.set_dy_rho, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_dy_ux, app->cpu_const_state.set_dy_ux, bytes, MODIFY_UPLOAD);
-                sim_modify(app->gpu_const_state.set_dy_uy, app->cpu_const_state.set_dy_uy, bytes, MODIFY_UPLOAD);
+                cudaMemcpy(app->gpu_const_state.face_y_set_der_ro, app->cpu_const_state.face_y_set_der_ro, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_y_set_der_ux, app->cpu_const_state.face_y_set_der_ux, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(app->gpu_const_state.face_y_set_der_uy, app->cpu_const_state.face_y_set_der_uy, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
             }
 
             last_intake_ux = intake_ux;
@@ -617,11 +597,29 @@ int main(int argc, char** argv)
 
             if(update_screen)
             {
-                double screen_start_time = clock_s();
                 render_last_time = frame_start_time;
-                draw_sci_cuda_memory("main", prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.rho);
-                // draw_sci_cuda_memory("main", prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ux);
+                draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ux, NULL);
+                // draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ro, NULL);
                 
+                float line_width = 0.0025f;
+                uint32_t intake_color = 0xFF0000;
+                uint32_t outake_color = 0x00FF00;
+                uint32_t wall_color = 0x333333;
+                float min_val = (float) app->config.app_display_min;
+                float max_val = (float) app->config.app_display_max;
+
+                float dx = app->config.region_width/prev_state.nx;
+                
+                draw_face_values(
+                    app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, offsetof(Sim_Face_Values, average.ux), 
+                    prev_state.nx, prev_state.ny, line_width, min_val, max_val);
+
+                // draw_face_values(
+                //     app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, offsetof(Sim_Face_Values, der_x.ux), 
+                //     prev_state.nx, prev_state.ny, line_width, -(max_val - min_val)/dx, (max_val - min_val)/dx);
+
+                // draw_walls(app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, intake_color, outake_color, wall_color, app->gpu_const_state.nx, app->gpu_const_state.ny, line_width);
+
                 Draw_Lines_Config lines_config = {0};
                 lines_config.nx = prev_state.nx;
                 lines_config.ny = prev_state.ny;
@@ -638,10 +636,9 @@ int main(int argc, char** argv)
                 lines_config.dx = 1.0f/prev_state.nx;
                 lines_config.dy = 1.0f/prev_state.ny;
 
-                draw_flow_arrows("flow", prev_state.ux, prev_state.uy, lines_config);
+                draw_flow_arrows(prev_state.ux, prev_state.uy, lines_config);
+
                 glfwSwapBuffers(window);
-                double screen_end_time = clock_s();
-                rendering_time = screen_end_time - screen_start_time;
             }
 
             if(update_frame_time_display)
@@ -782,14 +779,14 @@ void glfw_key_func(GLFWwindow* window, int key, int scancode, int action, int mo
 #endif
 
 #include <chrono>
-static double clock_s()
-{
-    static int64_t init_time = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    int64_t now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    double unit = (double) std::chrono::high_resolution_clock::period::den;
-    double clock = (double) (now - init_time) / unit;
-    return clock;
-}
+// static double clock_s()
+// {
+//     static int64_t init_time = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+//     int64_t now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+//     double unit = (double) std::chrono::high_resolution_clock::period::den;
+//     double clock = (double) (now - init_time) / unit;
+//     return clock;
+// }
 
 #include <thread>
 static void wait_s(double seconds)

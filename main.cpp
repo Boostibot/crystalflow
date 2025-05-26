@@ -21,7 +21,7 @@
 #define SCREEN_UPDATE_PERIOD        0.1
 #define SCREEN_UPDATE_IDLE_PERIOD   0.1
 #define POLL_EVENTS_PERIOD          0.1
-#define FREE_RUN_PERIOD             0.01
+#define FREE_RUN_PERIOD             0.00
 
 typedef Sim_Real Real;
 static double clock_s();
@@ -102,7 +102,7 @@ void sim_set_wall_noslip_at(Sim_Const_State* cpu, int32_t x, int32_t y)
     cpu->face_y_set_val_uy[f.n] = 0;
 }
 
-void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real outake, Real intake_rho, Real outake_rho, const Sim_Config& config)
+void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real inflow, Real outflow, Real inflow_rho, Real outflow_rho, const Sim_Config& config)
 {
     //place spherical wall
     double obstacle_diam = config.region_height/10;
@@ -130,24 +130,24 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
     }
 
 
-    int32_t intake_top = 1;
-    int32_t intake_bot = ny-1;
-    double intake_h = (intake_bot - intake_top)*dy;
-    double intake_mid = (intake_bot + intake_top)*dy/2;
-    for(int32_t y = intake_top; y < intake_bot; y++) {
+    int32_t inflow_top = 1;
+    int32_t inflow_bot = ny-1;
+    double inflow_h = (inflow_bot - inflow_top)*dy;
+    double inflow_mid = (inflow_bot + inflow_top)*dy/2;
+    for(int32_t y = inflow_top; y < inflow_bot; y++) {
         for(int32_t x = 0; x < 1; x++) {
             isize i = (isize) x + (isize) y*nx;
             double y_pos = (y + 0.5)*dy;
-            double parabola = (y_pos - intake_mid)/(intake_h/2);
+            double parabola = (y_pos - inflow_mid)/(inflow_h/2);
             double factor = CLAMP((1 - parabola*parabola), 0, 1);
-            double ux = intake*2*factor;
-            // ux = intake;
+            double ux = inflow*2*factor;
+            ux = inflow;
 
             cpu->cell_flags[i] = SIM_OUTSIDE_CELL;
 
             Face_Indices f = get_cell_face_indices(x, y, nx, ny);
             cpu->face_x_flags[f.e] = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
-            cpu->face_x_set_der_ro[f.e] = 0;
+            cpu->face_x_set_val_ro[f.e] = inflow_rho;
             cpu->face_x_set_val_ux[f.e] = ux;
             cpu->face_x_set_val_uy[f.e] = 0;
         }
@@ -159,16 +159,16 @@ void sim_set_boundary_conditions_tube(Sim_Const_State* cpu, Real intake, Real ou
 
             isize i = (isize) x + (isize) y*nx;
             double y_pos = (y + 0.5)*dy;
-            double parabola = (y_pos - intake_mid)/(intake_h/2);
+            double parabola = (y_pos - inflow_mid)/(inflow_h/2);
             double factor = CLAMP((1 - parabola*parabola), 0, 1);
-            double ux = intake*2*factor;
-            // ux = intake;
+            double ux = inflow*2*factor;
+            // ux = inflow;
 
             cpu->cell_flags[i] = SIM_OUTSIDE_CELL;
 
             Face_Indices f = get_cell_face_indices(x, y, nx, ny);
             cpu->face_x_flags[f.w] = SIM_SET_VAL_RO | SIM_SET_DER_UX | SIM_SET_DER_UY;
-            cpu->face_x_set_val_ro[f.w] = ux;
+            cpu->face_x_set_val_ro[f.w] = outflow_rho;
             cpu->face_x_set_der_ux[f.w] = 0;
             cpu->face_x_set_der_uy[f.w] = 0;
         }
@@ -399,17 +399,17 @@ int main(int argc, char** argv)
         LOG_INFO_CONFIG_FLOAT(obstacle_center_y);
         LOG_INFO_CONFIG_FLOAT(obstacle_radius);
 
-        LOG_INFO_CONFIG_FLOAT(intake_t0_ux);
-        LOG_INFO_CONFIG_FLOAT(intake_t0_uy);
-        LOG_INFO_CONFIG_FLOAT(intake_t0_rho);
+        LOG_INFO_CONFIG_FLOAT(inflow_t0_ux);
+        LOG_INFO_CONFIG_FLOAT(inflow_t0_uy);
+        LOG_INFO_CONFIG_FLOAT(inflow_t0_rho);
 
-        LOG_INFO_CONFIG_FLOAT(intake_tf_ux);
-        LOG_INFO_CONFIG_FLOAT(intake_tf_uy);
-        LOG_INFO_CONFIG_FLOAT(intake_tf_rho);
+        LOG_INFO_CONFIG_FLOAT(inflow_tf_ux);
+        LOG_INFO_CONFIG_FLOAT(inflow_tf_uy);
+        LOG_INFO_CONFIG_FLOAT(inflow_tf_rho);
 
-        LOG_INFO_CONFIG_FLOAT(intake_t1_ux);
-        LOG_INFO_CONFIG_FLOAT(intake_t1_uy);
-        LOG_INFO_CONFIG_FLOAT(intake_t1_rho);
+        LOG_INFO_CONFIG_FLOAT(inflow_t1_ux);
+        LOG_INFO_CONFIG_FLOAT(inflow_t1_uy);
+        LOG_INFO_CONFIG_FLOAT(inflow_t1_rho);
 
         LOG_INFO_CONFIG_FLOAT(simul_t0_t);
         LOG_INFO_CONFIG_FLOAT(simul_tf_t);
@@ -490,7 +490,7 @@ int main(int argc, char** argv)
         bool save_this_iter = false;
 
         sim_set_constant_initial_conditions(&app->cpu_mut_state, app->config.init_rho, app->config.init_ux, app->config.init_uy, app->config);
-        sim_set_boundary_conditions_tube(&app->cpu_const_state, app->config.intake_t0_ux, app->config.intake_t0_ux, app->config.intake_t0_rho, app->config.intake_t0_rho, app->config);
+        sim_set_boundary_conditions_tube(&app->cpu_const_state, app->config.inflow_t0_ux, app->config.inflow_t0_ux, app->config.inflow_t0_rho, app->config.inflow_t0_rho, app->config);
         {
             size_t bytes = (size_t) app->config.nx * (size_t) app->config.ny * (size_t) sizeof(Real);
             sim_modify(app->gpu_mut_states[1].ro, app->cpu_mut_state.ro, bytes, MODIFY_UPLOAD);
@@ -498,9 +498,9 @@ int main(int argc, char** argv)
             sim_modify(app->gpu_mut_states[1].uy, app->cpu_mut_state.uy, bytes, MODIFY_UPLOAD);
         }
 
-        double last_intake_ux = 0;
-        double last_intake_uy = 0;
-        double last_intake_rho = 0;
+        double last_inflow_ux = 0;
+        double last_inflow_uy = 0;
+        double last_inflow_rho = 0;
 
         double start_time = clock_s();
         while (!glfwWindowShouldClose(window))
@@ -518,28 +518,28 @@ int main(int argc, char** argv)
             double next_snapshot_times = (double) (snapshot_times_i + 1) * config.simul_t1_t / config.snapshot_times;
 
             //enforce boundary conditions
-            double intake_ux = last_intake_ux;
-            double intake_uy = last_intake_uy;
-            double intake_rho = last_intake_rho;
+            double inflow_ux = last_inflow_ux;
+            double inflow_uy = last_inflow_uy;
+            double inflow_rho = last_inflow_rho;
             if(app->config.simul_t0_t <= app->sim_time && app->sim_time < app->config.simul_tf_t)
             {
                 double t = (app->sim_time - app->config.simul_t0_t)/(app->config.simul_tf_t - app->config.simul_t0_t);
-                intake_rho = lerp(app->config.intake_t0_rho, app->config.intake_tf_rho, t);
-                intake_ux = lerp(app->config.intake_t0_ux, app->config.intake_tf_ux, t);
-                intake_uy = lerp(app->config.intake_t0_uy, app->config.intake_tf_uy, t);
+                inflow_rho = lerp(app->config.inflow_t0_rho, app->config.inflow_tf_rho, t);
+                inflow_ux = lerp(app->config.inflow_t0_ux, app->config.inflow_tf_ux, t);
+                inflow_uy = lerp(app->config.inflow_t0_uy, app->config.inflow_tf_uy, t);
             }
             if(app->config.simul_tf_t <= app->sim_time && app->sim_time < app->config.simul_t1_t)
             {
                 double t = (app->sim_time - app->config.simul_tf_t)/(app->config.simul_t1_t - app->config.simul_tf_t);
-                intake_rho = lerp(app->config.intake_t1_rho, app->config.intake_t1_rho, t);
-                intake_ux = lerp(app->config.intake_t1_ux, app->config.intake_t1_ux, t);
-                intake_uy = lerp(app->config.intake_t1_uy, app->config.intake_t1_uy, t);
+                inflow_rho = lerp(app->config.inflow_t1_rho, app->config.inflow_t1_rho, t);
+                inflow_ux = lerp(app->config.inflow_t1_ux, app->config.inflow_t1_ux, t);
+                inflow_uy = lerp(app->config.inflow_t1_uy, app->config.inflow_t1_uy, t);
             }
 
-            if(intake_ux != last_intake_ux || intake_uy != last_intake_uy || intake_rho != last_intake_rho) 
+            if(inflow_ux != last_inflow_ux || inflow_uy != last_inflow_uy || inflow_rho != last_inflow_rho) 
             {
-                sim_set_boundary_conditions_tube(&app->cpu_const_state, intake_ux, intake_ux, intake_rho, intake_rho, app->config);
-
+                sim_set_boundary_conditions_tube(&app->cpu_const_state, inflow_ux, inflow_ux, inflow_rho, inflow_rho, app->config);
+ 
                 isize nx = app->cpu_const_state.nx;
                 isize ny = app->cpu_const_state.ny;
                 size_t cells = (size_t) nx * (size_t) ny;
@@ -567,9 +567,9 @@ int main(int argc, char** argv)
                 cudaMemcpy(app->gpu_const_state.face_y_set_der_uy, app->cpu_const_state.face_y_set_der_uy, faces_y * sizeof(Sim_Real), cudaMemcpyHostToDevice);
             }
 
-            last_intake_ux = intake_ux;
-            last_intake_uy = intake_uy;
-            last_intake_rho = intake_rho;
+            last_inflow_ux = inflow_ux;
+            last_inflow_uy = inflow_uy;
+            last_inflow_rho = inflow_rho;
 
             //
             if(app->sim_time >= next_snapshot_every)
@@ -598,27 +598,27 @@ int main(int argc, char** argv)
             if(update_screen)
             {
                 render_last_time = frame_start_time;
-                draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ux, NULL);
-                // draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ro, NULL);
+                // draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ux, NULL);
+                draw_colormap(prev_state.nx, prev_state.ny, (float) app->config.app_display_min, (float) app->config.app_display_max, config.app_linear_filtering, prev_state.ro, NULL);
                 
                 float line_width = 0.0025f;
-                uint32_t intake_color = 0xFF0000;
-                uint32_t outake_color = 0x00FF00;
+                uint32_t inflow_color = 0xFF0000;
+                uint32_t outflow_color = 0x00FF00;
                 uint32_t wall_color = 0x333333;
                 float min_val = (float) app->config.app_display_min;
                 float max_val = (float) app->config.app_display_max;
 
                 float dx = app->config.region_width/prev_state.nx;
                 
-                draw_face_values(
-                    app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, offsetof(Sim_Face_Values, average.ux), 
-                    prev_state.nx, prev_state.ny, line_width, min_val, max_val);
+                // draw_face_values(
+                //     app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, offsetof(Sim_Face_Values, average.ux), 
+                //     prev_state.nx, prev_state.ny, line_width, min_val, max_val);
 
                 // draw_face_values(
                 //     app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, offsetof(Sim_Face_Values, der_x.ux), 
                 //     prev_state.nx, prev_state.ny, line_width, -(max_val - min_val)/dx, (max_val - min_val)/dx);
 
-                // draw_walls(app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, intake_color, outake_color, wall_color, app->gpu_const_state.nx, app->gpu_const_state.ny, line_width);
+                // draw_walls(app->gpu_const_state.face_x_values, app->gpu_const_state.face_y_values, inflow_color, outflow_color, wall_color, app->gpu_const_state.nx, app->gpu_const_state.ny, line_width);
 
                 Draw_Lines_Config lines_config = {0};
                 lines_config.nx = prev_state.nx;
@@ -636,7 +636,7 @@ int main(int argc, char** argv)
                 lines_config.dx = 1.0f/prev_state.nx;
                 lines_config.dy = 1.0f/prev_state.ny;
 
-                draw_flow_arrows(prev_state.ux, prev_state.uy, lines_config);
+                // draw_flow_arrows(prev_state.ux, prev_state.uy, lines_config);
 
                 glfwSwapBuffers(window);
             }

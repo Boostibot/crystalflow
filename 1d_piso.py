@@ -5,8 +5,9 @@ from matplotlib.animation import FuncAnimation
 
 N = 100
 
+
 cells_ro = np.zeros(N)
-cells_ux = np.zeros(N)
+cells_ux = np.zeros(N+1)
 
 cells_new_ro = np.zeros(N)
 cells_new_ux = np.zeros(N)
@@ -19,6 +20,7 @@ faces_upw_ux = np.zeros(N+1)
 
 faces_der_ro = np.zeros(N+1)
 faces_der_ux = np.zeros(N+1)
+faces_r = np.zeros(N+1)
 
 # BOUNDARY CONDITIONS
 
@@ -34,6 +36,7 @@ boundary_condition_outflow_ux = "der"
 R_spec = 287
 T = 272 + 20
 c_sound = 343
+piso_iters = 2
 
 inflow_ux = 1
 inflow_ro = 1
@@ -77,6 +80,165 @@ def get_mach_number():
 # => ρ = p / (Rspec*T)
 def ro_from_pressure(p):
     return p / (R_spec*T)
+
+# These functions return "stencils" of coefficients
+# which can later be used to evaluate the given equation
+# explicitly or form a matrix equation and evaluate implciitly.
+# The format is little strange but makes sense.
+# 
+# Stencil is array of 4 item:
+# stencil[0] - west neighbour coeficient
+# stencil[1] - evaluated cell coeficient
+# stencil[2] - east neighbour coeficient
+# stencil[3] - source term which is shifted to right hand side
+# stencil[4] - value (see below)
+# 
+# so together one can convert the stencil to value by doing
+# value = var_west*stencil[0] + var_curr*stencil[1] + var_east*stencil[2] + stencil[3]
+# 
+# The advantage of this format is that one can calculate with stencils the same way one 
+# would calculate with the produced values (as long as only linear transfomations are used).
+
+FACE_AREA = dx
+CELL_AREA = dx*dx
+rho = 1
+
+def H(u, i, eval=False):
+    upw_stencil_w = np.zeros(4)
+    upw_stencil_e = np.zeros(4)
+    der_stencil_w = np.zeros(4)
+    der_stencil_e = np.zeros(4)
+
+    u_w = 0
+    u_c = 0
+    u_e = 0
+
+    assert i >= 0 and i <= N
+    if i == 0:
+        u_c = u[i]
+        u_e = u[i+1]
+
+        # upwind u
+        upw_stencil_w[3] = inflow_ux
+
+        if u_e - u_c >= 0:
+            upw_stencil_e[1] += u_c
+        else:
+            upw_stencil_e[2] += u_e
+
+        # diffusion
+        der_stencil_w[3] = -2/dx*inflow_ux
+        der_stencil_w[1] = 2/dx
+
+        der_stencil_e[1] = -1/dx
+        der_stencil_e[2] = 1/dx
+    elif i == N:
+        u_w = u[i-1]
+        u_c = u[i]
+
+        # upwind u
+        if u_c - u_w >= 0:
+            upw_stencil_w[0] += u_w
+        else:
+            upw_stencil_w[1] += u_c
+
+        upw_stencil_e[1] += u_c
+
+        # diffusion
+        der_stencil_w[0] = -1/dx
+        der_stencil_w[1] = 1/dx
+
+        der_stencil_e[1] = 0
+        der_stencil_e[2] = 0
+    else:
+        u_w = u[i-1]
+        u_c = u[i]
+        u_e = u[i+1]
+
+        # upwind u
+        if u_c - u_w >= 0:
+            upw_stencil_w[0] += u_w
+        else:
+            upw_stencil_w[1] += u_c
+
+        if u_e - u_c >= 0:
+            upw_stencil_e[1] += u_c
+        else:
+            upw_stencil_e[2] += u_e
+
+        # diffusion
+        der_stencil_w[0] = -1/dx
+        der_stencil_w[1] = 1/dx
+
+        der_stencil_e[1] = -1/dx
+        der_stencil_e[2] = 1/dx
+
+    H = -rho*(upw_stencil_e - upw_stencil_w)*FACE_AREA \
+        +lam*(der_stencil_e - der_stencil_e)*FACE_AREA
+    
+    if i == 0:
+        assert H[0] == 0
+    if i == N:
+        assert H[2] == 0
+
+    if eval:
+        return u_w*H[0] + u_c*H[1] + u_e*H[2] + H[3]
+    else:
+        return H
+
+
+def delta_u(u):
+    delta = np.zeros_like(u)
+    delta[1:-1] = (u[2:] - u[:-2])*(FACE_AREA/2)
+    delta[0] = (u[1] + u[0])/2*FACE_AREA - inflow_ux*FACE_AREA
+    delta[-1] = 0
+    return None
+
+def delta_H(H, u):
+    delta = np.zeros_like(H)
+    delta[1:-1] = (H[2:] - H[:-2])*(FACE_AREA/2)
+    delta[0] = (H[1] + H[0])/2*FACE_AREA - inflow_ux*FACE_AREA
+    delta[-1] = 0
+    return None
+
+def step(u, p):
+
+    # precalculate common coeffs
+    S = 0
+    b = rho*CELL_AREA/dt*u + S*CELL_AREA
+    dx_b = delta_u(b)
+
+    # predictor
+    for i in range(0, N+1):
+        h = H(u, i)
+
+        A_w = -h[0]
+        A_c = rho/dt - h[1]
+        A_e = -h[2]
+        b = u[i] - (p[i] - p[i-1])*FACE_AREA + h[4]
+
+    # solve somehow...
+    u_star = np.zeros_like(u)
+
+    corrector_count = 2
+    
+    for k in range(corrector_count):
+        #pressure poisson equation matrix
+        for i in range(0, N+1):
+            b = H(u_star, i+1, eval=True) - H(u_star, i, eval=True) \
+                +  rho/dt*(u[i+1] - u[i])
+            A_w = 1*dx
+            A_c = -2*dx
+            A_e = 1*dx
+
+        # solve using CG
+        p_star_next = np.zeros_like(p)
+
+        u_star_next = np.zeros_like(u)
+        for i in range(0, N):
+            h = H(u_star)
+            u_star_next[i] = 
+
 
 x_ro = ro_from_pressure(1e5)
 

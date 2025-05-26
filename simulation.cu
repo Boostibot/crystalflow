@@ -552,23 +552,24 @@ extern "C" double sim_step(Sim_Mut_State* next, const Sim_Mut_State* prev, Sim_C
         Sim_Face_Values fs = faces_y.at(x, y+0);
         Sim_Face_Values fn = faces_y.at(x, y+1);
 
-        if(y == 1 && x == 1) {
+        if(y == ny/2 && x == 1) {
             int k = 0;
         }
 
         Real dt_ro = 
-            -(fe.upwind.ro*fe.upwind.ux - fw.upwind.ro*fw.upwind.ux)/dx 
-            -(fn.upwind.ro*fn.upwind.uy - fs.upwind.ro*fs.upwind.uy)/dy;
+            -(fe.average.ro*fe.average.ux - fw.average.ro*fw.average.ux)/dx 
+            // -(fn.average.ro*fn.average.uy - fs.average.ro*fs.average.uy)/dy
+        ;
 
         // dt_ro = 0;
         Real ro_dt_ux = 
             -(fe.upwind.ro*fe.upwind.ux*fe.average.ux - fw.upwind.ro*fw.upwind.ux*fw.average.ux)/dx
-            -(fn.upwind.ro*fn.upwind.ux*fn.average.uy - fs.upwind.ro*fs.upwind.ux*fs.average.uy)/dy
+            // -(fn.upwind.ro*fn.upwind.ux*fn.average.uy - fs.upwind.ro*fs.upwind.ux*fs.average.uy)/dy
             // +(lambda + 2*mu)*(fe.der_x.ux - fw.der_x.ux)/dx 
             // +lambda*(fe.der_y.uy - fw.der_y.uy)/dx 
             // +mu*(fn.der_x.ux - fs.der_x.ux)/dy 
             // +mu*(fn.der_y.uy - fs.der_y.uy)/dy
-            -R_spec*T*(fe.upwind.ro - fw.upwind.ro)/dx 
+            // -R_spec*T*(fe.upwind.ro - fw.upwind.ro)/dx 
             // -ux*dt_ro + ro*Fx
         ;
 

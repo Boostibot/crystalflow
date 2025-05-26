@@ -303,17 +303,17 @@ typedef struct Sim_Config{
     double obstacle_center_y;
     double obstacle_radius;
 
-    double intake_t0_ux;
-    double intake_t0_uy;
-    double intake_t0_rho;
+    double inflow_t0_ux;
+    double inflow_t0_uy;
+    double inflow_t0_rho;
 
-    double intake_tf_ux;
-    double intake_tf_uy;
-    double intake_tf_rho;
+    double inflow_tf_ux;
+    double inflow_tf_uy;
+    double inflow_tf_rho;
 
-    double intake_t1_ux;
-    double intake_t1_uy;
-    double intake_t1_rho;
+    double inflow_t1_ux;
+    double inflow_t1_uy;
+    double inflow_t1_rho;
 
     double simul_t0_t;
     double simul_tf_t;
@@ -409,17 +409,17 @@ bool sim_read_config(const char* path, Sim_Config* config, const char* overrides
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->obstacle_center_y, "simulation", "obstacle_center_y");
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->obstacle_radius, "simulation", "obstacle_radius");
 
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t0_ux, "simulation", "intake_t0_ux");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t0_uy, "simulation", "intake_t0_uy");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t0_rho, "simulation", "intake_t0_rho");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t0_ux, "simulation", "inflow_t0_ux");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t0_uy, "simulation", "inflow_t0_uy");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t0_rho, "simulation", "inflow_t0_rho");
 
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_tf_ux, "simulation", "intake_tf_ux");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_tf_uy, "simulation", "intake_tf_uy");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_tf_rho, "simulation", "intake_tf_rho");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_tf_ux, "simulation", "inflow_tf_ux");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_tf_uy, "simulation", "inflow_tf_uy");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_tf_rho, "simulation", "inflow_tf_rho");
 
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t1_ux, "simulation", "intake_t1_ux");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t1_uy, "simulation", "intake_t1_uy");
-        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->intake_t1_rho, "simulation", "intake_t1_rho");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t1_ux, "simulation", "inflow_t1_ux");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t1_uy, "simulation", "inflow_t1_uy");
+        read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->inflow_t1_rho, "simulation", "inflow_t1_rho");
 
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->simul_t0_t, "simulation", "simul_t0_t");
         read_state &= (uint8_t) key_value_ini_get_double(pairs, &config->simul_tf_t, "simulation", "simul_tf_t");

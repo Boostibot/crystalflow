@@ -458,7 +458,7 @@ void draw_face_values(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, isize 
     draw_vertices(g_cuda_vertices, count, NULL, NULL);
 }
 
-void draw_walls(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, uint32_t intake_color, uint32_t outake_color, uint32_t wall_color, isize nx, isize ny, float width)
+void draw_walls(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, uint32_t inflow_color, uint32_t outflow_color, uint32_t wall_color, isize nx, isize ny, float width)
 {
     if(g_cuda_vertices == NULL) 
         CUDA_TEST(cudaMalloc(&g_cuda_vertices, (size_t) g_cuda_vertices_count*6*sizeof(Sim_Color_Vertex)));
@@ -483,8 +483,8 @@ void draw_walls(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, uint32_t int
     Strided_2D_Span flags_y_span = faces_y_span;
     flags_y_span.data = (uint8_t*) faces_y + offsetof(Sim_Face_Values, flags);
 
-    Sim_Flags intake_flags = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
-    Sim_Flags outake_flags = SIM_SET_VAL_RO | SIM_SET_DER_UX | SIM_SET_DER_UY;
+    Sim_Flags inflow_flags = SIM_SET_DER_RO | SIM_SET_VAL_UX | SIM_SET_VAL_UY;
+    Sim_Flags outflow_flags = SIM_SET_VAL_RO | SIM_SET_DER_UX | SIM_SET_DER_UY;
 
     Draw_Walls_Params walls_config_base = {0};
     walls_config_base.is_x_dir = true;
@@ -503,27 +503,27 @@ void draw_walls(Sim_Face_Values* faces_x, Sim_Face_Values* faces_y, uint32_t int
     
     */
 
-    Draw_Walls_Params walls_config_x_intake = walls_config_base;
-    walls_config_x_intake.is_x_dir = true;
-    walls_config_x_intake.static_color = intake_color;
+    Draw_Walls_Params walls_config_x_inflow = walls_config_base;
+    walls_config_x_inflow.is_x_dir = true;
+    walls_config_x_inflow.static_color = inflow_color;
 
-    Draw_Walls_Params walls_config_x_outake = walls_config_base;
-    walls_config_x_outake.is_x_dir = true;
-    walls_config_x_outake.static_color = outake_color;
+    Draw_Walls_Params walls_config_x_outflow = walls_config_base;
+    walls_config_x_outflow.is_x_dir = true;
+    walls_config_x_outflow.static_color = outflow_color;
     
-    Draw_Walls_Params walls_config_y_intake = walls_config_base;
-    walls_config_y_intake.is_x_dir = false;
-    walls_config_y_intake.static_color = intake_color;
+    Draw_Walls_Params walls_config_y_inflow = walls_config_base;
+    walls_config_y_inflow.is_x_dir = false;
+    walls_config_y_inflow.static_color = inflow_color;
 
-    Draw_Walls_Params walls_config_y_outake = walls_config_base;
-    walls_config_y_outake.is_x_dir = false;
-    walls_config_y_outake.static_color = outake_color;
+    Draw_Walls_Params walls_config_y_outflow = walls_config_base;
+    walls_config_y_outflow.is_x_dir = false;
+    walls_config_y_outflow.static_color = outflow_color;
 
     isize count = 0;
-    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, intake_flags, walls_config_x_intake);
-    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, outake_flags, walls_config_x_outake);
-    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, intake_flags, walls_config_y_intake);
-    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, outake_flags, walls_config_y_outake);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, inflow_flags, walls_config_x_inflow);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_x_span, flags_x_span, outflow_flags, walls_config_x_outflow);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, inflow_flags, walls_config_y_inflow);
+    sim_make_face_vertices_flagged(g_cuda_vertices, &count, g_cuda_vertices_count, faces_y_span, flags_y_span, outflow_flags, walls_config_y_outflow);
     draw_vertices(g_cuda_vertices, count, NULL, NULL);
 }
 

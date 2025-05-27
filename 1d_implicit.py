@@ -11,10 +11,10 @@ c_sound = 343
 
 width = 1
 dx = width/N
-dt = 2e-1
+dt = 2e-2
 
 rho = 1
-ini_p = 1
+ini_p = 0
 ini_ux = 0
 
 t0 = 0
@@ -46,15 +46,17 @@ def dirichlet(val=0):
 def neumann(val=0):
     return Boundary("der", val)
 
-def apply_stencil(stencil, field):
+def apply_stencil(stencil, field, remove_diag=False, remove_RHS=False):
     assert len(stencil) == 4
     assert len(stencil[0]) == len(field)
 
     out = np.zeros_like(field)
     out[1:] += stencil[0, :-1]*field[:-1]
-    out += stencil[1]*field 
+    if remove_diag == False:
+        out += stencil[1]*field 
     out[:-1] += stencil[2, 1:]*field[1:]
-    out += stencil[3] 
+    if remove_diag == False:
+        out += stencil[3] 
     return out
 
 def set_stencil(A, row, w, c, e, b):
@@ -120,7 +122,7 @@ def upwind(u, BC_u, BC_phi, phi=None):
     A = np.zeros((4, len(u)))
     upw_dir = u[1:-1] >= 0
 
-    #                       C                   W                           E               C 
+    #                       C                     W                           E                        C 
     # delta[1:-1] = upw_dir*(u[1:-1]*v[1:-1] - u[:-2]*v[:-2])/dx + (upw_dir - 1)*(u[2:]*v[2:] - u[1:-1]*v[1:-1])/dx
     A[0, :-2] += upw_dir*(-u[:-2]/dx)
     A[1, 1:-1] += upw_dir*u[1:-1]/dx - (upw_dir - 1)*u[1:-1]/dx  
@@ -170,12 +172,79 @@ def upwind(u, BC_u, BC_phi, phi=None):
         return A
     
 def H(u, BC_u, BC_phi, phi=None):
-    A = upwind(u, BC_u=BC_u, BC_phi=BC_phi, phi=phi) #advection
+    # A = upwind(u, BC_u=BC_u, BC_phi=BC_phi, phi=phi) #advection
+    A = 0
     D = central_second(BC_phi, phi=phi) #diffusion
     return -rho*A + mu*D
 
 def stencil_to_sparse_matrix(A):
     return sp.sparse.diags([A[0, :-1], A[1], A[2, 1:]], [-1, 0, 1])
+
+BC_neumann = (neumann(), neumann())
+BC_dirichlet = (dirichlet(), dirichlet())
+
+def piso_step(u, p, BC_u, BC_p, piso_iters=2, relax=1, BC_source=BC_neumann):
+    S = 0
+    R = rho/dt*u + S
+    div_R = rho/dt*central(BC_u, u) #+ central(BC_source, S)
+
+    # predictor
+    h = H(u, BC_u=BC_u, BC_phi=BC_u)
+    A_pred = -h
+    A_pred[1] += rho/dt 
+    b_pred = R - central(BC_p, p) + h[3]
+
+    u_pred, info = sp.sparse.linalg.cgs(stencil_to_sparse_matrix(A_pred), b_pred)
+    if info != 0:
+        cond_num = sparse_cond_num(stencil_to_sparse_matrix(P))
+        print(f"{cond_num=}")
+    assert info == 0
+
+    divergences = np.zeros(piso_iters + 1)
+
+    u_star = u_pred
+    p_star = p
+    # corrector loop
+    for k in range(piso_iters):
+        divergences[k] = np.linalg.norm(central(BC_u, u_star))
+
+        # Calc shared H(u_star)
+        # h_u_star = H(u_star, BC_u=BC_u, BC_phi=BC_u)
+        h_u_star = h
+        div_u_star = central(BC_u, phi=u_star)
+        div_H_u_star = apply_stencil(h_u_star, div_u_star, remove_RHS=True) + central(BC_source, h_u_star[3])
+
+        # posisson EQ for pressure
+        P = central_second(BC_p)
+        b_poisson = div_H_u_star + div_R
+
+        p_star_next, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), b_poisson)
+        if info != 0:
+            cond_num = sparse_cond_num(stencil_to_sparse_matrix(P))
+            print(f"{cond_num=}")
+        assert info == 0
+
+        # explicit update of velocity
+        H_u_star_diag = h_u_star[1]*u_star
+        H_u_star_prime = apply_stencil(h_u_star, u_star, remove_diag=True)
+        p_next_div = central(BC_p, p_star_next)
+
+        u_star_next = (H_u_star_prime + R - p_next_div)/(rho/dt - H_u_star_diag)
+
+        # use corrected 
+        u_star = u_star*(1 - relax) + u_star_next*relax
+        p_star = p_star*(1 - relax) + p_star_next*relax
+
+    divergences[piso_iters] = np.linalg.norm(central(BC_u, u_star))
+    return (u_star, p_star)
+
+def sparse_cond_num(A):
+    try:
+        norm_A = sp.sparse.linalg.norm(A)
+        norm_A_inv = sp.sparse.linalg.norm(sp.sparse.linalg.inv(A))
+        return norm_A*norm_A_inv
+    except RuntimeError:
+        return np.inf
 
 def step(u, p, BC_u, BC_p, method="implicit"):
     S = 0
@@ -183,7 +252,6 @@ def step(u, p, BC_u, BC_p, method="implicit"):
     u_star = None
     u_strange = None
 
-        # assert info == 0
     # Classic projection method (explicit advection diffusion)
     if method == "explicit":
         u_star = u + dt/rho*( \
@@ -202,9 +270,6 @@ def step(u, p, BC_u, BC_p, method="implicit"):
         b = rho/dt*u + S + h[3]
 
         u_star, info = sp.sparse.linalg.cgs(stencil_to_sparse_matrix(U), b)
-        if info != 0:
-            u_strange = upwind(u, BC_u=BC_u, BC_phi=BC_u, phi=u) #advection
-
 
     # "Stable fluids" method (explicit advection, implicit diffusion)
     elif method == "stable":
@@ -219,6 +284,8 @@ def step(u, p, BC_u, BC_p, method="implicit"):
 
         u_star, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(U), b)
 
+    elif method == "piso":
+        return piso_step(u, p, BC_u, BC_p)
     else:
         assert(False)
 
@@ -227,6 +294,10 @@ def step(u, p, BC_u, BC_p, method="implicit"):
 
     p_next = np.zeros_like(p)
     p_next, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), b)
+    if info != 0:
+        cond_num = sparse_cond_num(stencil_to_sparse_matrix(P))
+        print(f"{cond_num=}")
+
     assert info == 0
 
     # u_next = u_star
@@ -249,8 +320,8 @@ def graph():
     p = np.zeros(N) + ini_p
     u = np.zeros(N) + ini_ux
 
-    for i in range(len(u)//4, len(u)//2):
-        u[i] = 1
+    # for i in range(len(u)//4, len(u)//2):
+        # u[i] = 1
 
     u_cells, = ax_ux.plot(cell_centers, u, label='u')
     # u_faces, = ax_ux.plot(face_positions, faces_avg_ux, 's', label='ux faces')
@@ -275,8 +346,9 @@ def graph():
     while t < t1:
         inflow_ux = min(1, t)
         # method = "explicit"
-        method = "implicit"
-        # method = "stable"
+        # method = "implicit"
+        method = "stable"
+        # method = "piso"
         BC_u = (dirichlet(inflow_ux), neumann(0))
         BC_p = (neumann(0),           dirichlet(0))
 

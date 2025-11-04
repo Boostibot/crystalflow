@@ -73,8 +73,8 @@ def set_stencil(A, row, w, c, e, b):
         A[2, row+1] = e
 
 
-def central(BC, phi=None):
-    A = np.zeros((4, N))
+def central(BC, phi=None, n=N):
+    A = np.zeros((4, n))
     A[0, :-2] += -1/(2*dx)
     A[2, 2:] += 1/(2*dx)
 
@@ -172,27 +172,123 @@ def upwind(u, BC_u, BC_phi, phi=None):
         return A
     
 def H(u, BC_u, BC_phi, phi=None):
-    # A = upwind(u, BC_u=BC_u, BC_phi=BC_phi, phi=phi) #advection
-    A = 0
+    A = upwind(u, BC_u=BC_u, BC_phi=BC_phi, phi=phi) #advection
+    # A = 0
     D = central_second(BC_phi, phi=phi) #diffusion
     return -rho*A + mu*D
 
 def stencil_to_sparse_matrix(A):
     return sp.sparse.diags([A[0, :-1], A[1], A[2, 1:]], [-1, 0, 1])
 
+
+# Sim Boundary types:
+# Inflow
+# Outflow
+# Wall
+
+
+# Impl boundary types (relative to a specific field):
+# der +/-
+# val +/-
+
+def BC_to_ghost(side:str, BC:Boundary, val:float) -> float:
+    if BC.type == "val":
+        return 2*BC.value - val
+    if BC.type == "der":
+        if side == "west": return -BC.value*dx + val
+        if side == "east": return BC.value*dx + val
+    return 0.0
+
+def ghost_to_BC(side:str, BC_kind:str, val:float, ghost:float) -> Boundary:
+    if BC_kind == "val":
+        return Boundary(BC_kind, (val + ghost)/2)
+    if BC_kind == "der":
+        if side == "west": return Boundary(BC_kind, (val - ghost)/dx)
+        if side == "east": return Boundary(BC_kind, (ghost - val)/dx)
+    return Boundary("none")
+
+def BC_convert(side:str, BC_kind:str, BC:Boundary, val:float) -> Boundary:
+    if BC_kind == BC.type:
+        return BC
+    ghost = BC_to_ghost(side, BC, val)
+    return ghost_to_BC(side, BC_kind, val, ghost)
+
+def expand(BCs, phi):
+    out = np.empty(phi.shape[0]+2, dtype=phi.dtype)
+    out[1: -1] = phi
+    out[0] = BC_to_ghost("west", BCs[0], phi[0])
+    out[-1] = BC_to_ghost("east", BCs[-1], phi[-1])
+    return out
+
+def contract(phi):
+    return phi[1:-1]
+
 BC_neumann = (neumann(), neumann())
 BC_dirichlet = (dirichlet(), dirichlet())
+BC_none = (Boundary("none"), Boundary("none"))
+
+def pder_boundary_west(BC_u, u:np.ndarray, u_dt:float) -> Boundary:
+    u_exp = expand(BC_u, u)
+    u0, u1, u2 = u_exp[0], u_exp[1], u_exp[2]
+    uf = (u0 + u1)/2
+    ug = (u1 + u2)/2
+    dx_uf = (u1 - u0)/dx
+    dx_ug = (u2 - u1)/dx
+    # dxx_ufg = 2*(dx_ug - dx_uf)/dx
+    dxx_ufg = 0
+    dt_uf = u_dt
+    dt_ug = u_dt
+    Sf = 0
+    Sg = 0
+    p_der = -rho*(dt_uf + uf*dx_uf) + mu*dxx_ufg + Sf
+
+    # higher p_der|f
+    # => (explicit scheme) dt_u = terms - (p_der|f - p_der|g) => lower dt_u
+    # => lower u1
+    # => lower dx_uf
+    # => higher p_der
+
+    return neumann(p_der)
+
+def pder_boundary(side:str, u0:float, u1:float, u2:float, u_dt:float = 0) -> float:
+    uf = (u0 + u1)/2
+    ug = (u1 + u2)/2
+    dx_uf = (u1 - u0)/dx
+    dx_ug = (u2 - u1)/dx
+    dxx_ufg = (dx_ug - dx_uf)/dx
+    dxx_ufg = 0
+    dt_uf = u_dt
+    dt_ug = u_dt
+    Sf = 0
+    Sg = 0
+
+    if side == "west":
+        p_der = -rho*(dt_uf + uf*dx_uf) + mu*dxx_ufg + Sf
+    else:
+        p_der = -rho*(dt_ug + ug*dx_ug) + mu*dxx_ufg + Sg
+    return p_der
+
+def calc_p_boundaries(wtype, etype, BC_u, u:np.ndarray, p:np.ndarray):
+    u_exp = expand(BC_u, u)
+    dp_0 = pder_boundary("west", u_exp[ 0], u_exp[ 1], u_exp[ 2])
+    dp_N = pder_boundary("east", u_exp[-3], u_exp[-2], u_exp[-1])
+
+    BC_0 = BC_convert("west", wtype, neumann(dp_0), p[0])
+    BC_N = BC_convert("east", etype, neumann(dp_N), p[-1])
+    return (BC_0, BC_N)
 
 def piso_step(u, p, BC_u, BC_p, piso_iters=2, relax=1, BC_source=BC_neumann):
-    S = 0
-    R = rho/dt*u + S
-    div_R = rho/dt*central(BC_u, u) #+ central(BC_source, S)
-
     # predictor
     h = H(u, BC_u=BC_u, BC_phi=BC_u)
+    A = h[1]
+    B = h[3]
+    S = 0
+    alpha = rho/dt
+    R = alpha*u + S
+
     A_pred = -h
-    A_pred[1] += rho/dt 
-    b_pred = R - central(BC_p, p) + h[3]
+    A_pred[1] += alpha 
+    b_pred = R - central(BC_p, p) + B
 
     u_pred, info = sp.sparse.linalg.cgs(stencil_to_sparse_matrix(A_pred), b_pred)
     if info != 0:
@@ -200,42 +296,38 @@ def piso_step(u, p, BC_u, BC_p, piso_iters=2, relax=1, BC_source=BC_neumann):
         print(f"{cond_num=}")
     assert info == 0
 
-    divergences = np.zeros(piso_iters + 1)
 
     u_star = u_pred
     p_star = p
     # corrector loop
     for k in range(piso_iters):
-        divergences[k] = np.linalg.norm(central(BC_u, u_star))
+        L = apply_stencil(h, u_star) + R
 
-        # Calc shared H(u_star)
-        # h_u_star = H(u_star, BC_u=BC_u, BC_phi=BC_u)
-        h_u_star = h
-        div_u_star = central(BC_u, phi=u_star)
-        div_H_u_star = apply_stencil(h_u_star, div_u_star, remove_RHS=True) + central(BC_source, h_u_star[3])
+        # Expand according to predictor equation and apply
+        p_star_exp = expand(BC_p, p_star)
+        u_star_exp = expand(BC_u, u_star)
+        L_exp = expand(BC_u, (alpha - A)*u_star)
+        L_exp[0] += (p_star_exp[1] - p_star_exp[0])/dx
+        L_exp[-1] += (p_star_exp[-1] - p_star_exp[-2])/dx
+        L_exp[1:-1] = L
+        div_L_exp = central(BC_none, L_exp, n=L_exp.shape[0])
+        div_L = contract(div_L_exp)
 
         # posisson EQ for pressure
         P = central_second(BC_p)
-        b_poisson = div_H_u_star + div_R
-
-        p_star_next, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), b_poisson)
+        p_star_next, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), div_L)
         if info != 0:
             cond_num = sparse_cond_num(stencil_to_sparse_matrix(P))
             print(f"{cond_num=}")
         assert info == 0
 
         # explicit update of velocity
-        H_u_star_diag = h_u_star[1]*u_star
-        H_u_star_prime = apply_stencil(h_u_star, u_star, remove_diag=True)
         p_next_div = central(BC_p, p_star_next)
-
-        u_star_next = (H_u_star_prime + R - p_next_div)/(rho/dt - H_u_star_diag)
+        u_star_next = (L - p_next_div)/(alpha - A)
 
         # use corrected 
         u_star = u_star*(1 - relax) + u_star_next*relax
         p_star = p_star*(1 - relax) + p_star_next*relax
-
-    divergences[piso_iters] = np.linalg.norm(central(BC_u, u_star))
     return (u_star, p_star)
 
 def sparse_cond_num(A):
@@ -246,7 +338,7 @@ def sparse_cond_num(A):
     except RuntimeError:
         return np.inf
 
-def step(u, p, BC_u, BC_p, method="implicit"):
+def step(u, p, BC_u, BC_p, method="implicit", increment=False):
     S = 0
 
     u_star = None
@@ -254,10 +346,11 @@ def step(u, p, BC_u, BC_p, method="implicit"):
 
     # Classic projection method (explicit advection diffusion)
     if method == "explicit":
-        u_star = u + dt/rho*( \
-            H(u, BC_u, BC_u, phi=u) \
-            + S \
-        ) \
+        u_star = u + dt/rho*( 
+            H(u, BC_u, BC_u, phi=u) 
+            + S 
+            - (central(BC_p, p) if increment else 0)
+        ) 
         
     # Implicit projection method (implicit advection diffusion)
     elif method == "implicit":
@@ -267,12 +360,12 @@ def step(u, p, BC_u, BC_p, method="implicit"):
         U[1] += rho/dt
         U -= h[:3]
 
-        b = rho/dt*u + S + h[3]
+        b = rho/dt*u + S + h[3] - (central(BC_p, p) if increment else 0)
 
         u_star, info = sp.sparse.linalg.cgs(stencil_to_sparse_matrix(U), b)
 
     # "Stable fluids" method (explicit advection, implicit diffusion)
-    elif method == "stable":
+    elif method == "split":
         A = upwind(u, BC_u=BC_u, BC_phi=BC_u, phi=u) 
         u_adv = u + dt*A
 
@@ -280,7 +373,7 @@ def step(u, p, BC_u, BC_p, method="implicit"):
         U = -D
         U[1] += rho/dt
 
-        b = rho/dt*u + S + D[3]
+        b = rho/dt*u_adv + S + D[3] - (central(BC_p, p) if increment else 0)
 
         u_star, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(U), b)
 
@@ -291,18 +384,21 @@ def step(u, p, BC_u, BC_p, method="implicit"):
 
     P = central_second(BC_p)
     b = rho/dt*central(BC_u, phi=u_star) + P[3]
+    
+    # div(p^n+1 - p^n) = -1/dt(u^n+1 - u*)
+    # p_delta = p^n+1 - p^n
+    # => DIV: lap(p_delta) = 1/dt*div(u*)
+    # => NEX: u^n+1 = u* - dt*div(p_delta)
+    #         p^n+1 = p^n + p_delta
 
-    p_next = np.zeros_like(p)
-    p_next, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), b)
+    p_corr, info = sp.sparse.linalg.cg(stencil_to_sparse_matrix(P), b)
     if info != 0:
         cond_num = sparse_cond_num(stencil_to_sparse_matrix(P))
         print(f"{cond_num=}")
+        assert info == 0
 
-    assert info == 0
-
-    # u_next = u_star
-    u_next = u_star - dt/rho*central(BC_p, p_next)
-
+    u_next = u_star - dt/rho*central(BC_p, p_corr)
+    p_next = p + p_corr if increment else p_corr
     return (u_next, p_next)
 
 def graph():
@@ -343,16 +439,22 @@ def graph():
 
     t = t0
     iter = 0
+    inflow_ux_last = 0
     while t < t1:
         inflow_ux = min(1, t)
+        inflow_ux_dt = (inflow_ux - inflow_ux_last)/dt
+        inflow_ux_last = inflow_ux
         # method = "explicit"
-        # method = "implicit"
-        method = "stable"
+        method = "implicit"
+        # method = "split"
         # method = "piso"
+        increment = True
+        # increment = False
         BC_u = (dirichlet(inflow_ux), neumann(0))
+        # BC_p = (pder_boundary_west(BC_u, u, inflow_ux_dt), dirichlet(0))
         BC_p = (neumann(0),           dirichlet(0))
 
-        u_next, p_next = step(u, p, BC_u, BC_p, method=method)
+        u_next, p_next = step(u, p, BC_u, BC_p, method=method, increment=increment)
 
         u, u_next = u_next, u
         p, p_next = p_next, p
@@ -372,8 +474,6 @@ def graph():
             # ax_ux.set_title(f"t = {float(t):.6} CFL = {cfl:.2} Ma = {Ma:.2}")
             ax_ux.set_title(f"t = {float(t):.6} div(u) = {div_u:.4e}")
             time.sleep(show_interval) 
-
-
 
         t += dt
         iter += 1

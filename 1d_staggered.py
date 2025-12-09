@@ -6,7 +6,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
-N = 20
+N = 8
 
 R_spec = 287
 T = 272 + 20
@@ -189,9 +189,6 @@ def step(un:np.ndarray, pn:np.ndarray, BCu, BCp, variant, rtol=1e-3, iters=1, al
             nonlocal BCu
             nonlocal unk
             expu = vel_expand_apply(u, BCu)
-            upw = vel_der_upw(expu, unk)
-            der2 = vel_der2(expu)
-
             H = -rho*unk*vel_der_upw(expu, unk) + mu*vel_der2(expu)
             U = rho/dt*u - H
             return U
@@ -269,9 +266,9 @@ def graph():
     while t <= t1:
         inflow_ux = min(1, t)
 
-        # variant = "non-increment"
+        variant = "non-increment"
         # variant = "increment"
-        variant = "increment-rot"
+        # variant = "increment-rot"
 
         # if iter % SMOOTH == 0: variant = "non-increment"
         # else:                  variant = "increment"

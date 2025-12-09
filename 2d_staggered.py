@@ -1,34 +1,18 @@
 import time
+import copy
 import numpy as np
 import scipy as sp
-import typing
-import matplotlib
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 
-Nx = 20
-Ny = 20
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Literal, Callable, Iterable, Union
 
 R_spec = 287
 T = 272 + 20
 c_sound = 343
 
-Lx = 1
-Ly = 1
-dx = Lx/Nx
-dy = Ly/Ny
-dt = 2e-2
-
-ini_p = 0
-ini_ux = 0
-
-t0 = 0
-t1 = 2
-
-nu = 1.3059e-2
-
-show_interval = 0.00
-multistep = 5
+# Predeclared globals. The values are set in the main function
+nx, ny, nu, Lx, Ly, dx, dy, dt = 0, 0, 0, 0, 0, 0, 0, 0
 
 def get_cfl(u):
     return np.max(np.abs(u)*dt/dx)
@@ -36,327 +20,540 @@ def get_cfl(u):
 def get_mach_number(u):
     return np.max(np.abs(u)/c_sound)
 
-BOUND_NONE = 0xffffffff
-
-# Bits 
-#  [0]: direction negative/positive
-#  [1]: direction normal/tangential
-#  [2]: boundary kind value/derivative (dirichlet/neumann)
-BOUND_VAL_W = 0b000 
-BOUND_VAL_E = 0b001
-BOUND_VAL_S = 0b010
-BOUND_VAL_N = 0b011
-
-BOUND_DER_W = 0b100 
-BOUND_DER_E = 0b101
-BOUND_DER_S = 0b110
-BOUND_DER_N = 0b111
-
-def bound_type_transpose(types:np.ndarray) -> np.ndarray:
-    return np.bitwise_xor(types, 0b010)
+Side         = Literal["N", "S", "E", "W"]
+LowBoundType = Literal["val", "der"]
+BoundaryType = Literal["inflow", "outflow", "wall"]
 
 @dataclass
-class Boundaries:
-    values:np.ndarray
-    types:np.ndarray
-    indices:np.ndarray
+class LowBound: # Low level boundary for a field
+    side:Side
+    type:LowBoundType
+    xs:int|np.ndarray
+    ys:int|np.ndarray
+    value:float|np.ndarray
+    
+    @staticmethod
+    def concat(a:Union['LowBound', None], b: Union['LowBound', None]) -> 'LowBound':
+        assert a or b
+        if a is None: return b
+        if b is None: return a
 
-class Grid:
-    ux_bc:Boundaries
-    uy_bc:Boundaries
-    p_bc:Boundaries
+        xs = np.concatenate([a.xs, b.xs])
+        ys = np.concatenate([a.ys, b.ys])
+        value = np.concatenate([a.value, b.value])
+        return LowBound(a.side, a.type, xs, ys, value)
+    
+LowBounds = Dict[str, LowBound] #collection of LowBounds by type
 
-def contract(f:np.ndarray) -> np.ndarray:
-    return f[1:-1, 1:-1] 
+@dataclass
+class Boundary: #High level boundary for the whole simulation
+    side:Side
+    type:BoundaryType
+    xs:np.ndarray
+    ys:np.ndarray
+    valp:np.ndarray
+    valu:np.ndarray
+    valv:np.ndarray
 
-def expand(f:np.ndarray) -> np.ndarray:
+    def __init__(self, side:Side, type:BoundaryType, xs:int|np.ndarray, ys:int|np.ndarray, valp:float|np.ndarray, valu:float|np.ndarray, valv:float|np.ndarray):
+        if   isinstance(xs, np.ndarray):   l = len(xs)
+        elif isinstance(ys, np.ndarray):   l = len(ys)
+        elif isinstance(valp, np.ndarray): l = len(valp)
+        elif isinstance(valu, np.ndarray): l = len(valu)
+        elif isinstance(valv, np.ndarray): l = len(valv)
+        else: l = 1
+
+        self.side = side
+        self.type = type
+        self.xs = xs if isinstance(xs, np.ndarray) else np.full(l, xs, dtype=int)
+        self.ys = ys if isinstance(ys, np.ndarray) else np.full(l, ys, dtype=int)
+        self.valp = valp if isinstance(valp, np.ndarray) else np.full(l, valp, dtype=float)
+        self.valu = valu if isinstance(valu, np.ndarray) else np.full(l, valu, dtype=float)
+        self.valv = valv if isinstance(valv, np.ndarray) else np.full(l, valv, dtype=float)
+
+    @staticmethod
+    def inflow(side:Side, xs:int|np.ndarray, ys:int|np.ndarray, velx:float|np.ndarray, vely:float|np.ndarray) -> 'Boundary':
+        return Boundary(side, "inflow", xs, ys, 0.0, velx, vely)
+    
+    @staticmethod
+    def outflow(side:Side, xs:int|np.ndarray, ys:int|np.ndarray) -> 'Boundary':
+        return Boundary(side, "outflow", xs, ys, 0.0, 0.0, 0.0)
+    
+    @staticmethod
+    def wall(side:Side, xs:int|np.ndarray, ys:int|np.ndarray) -> 'Boundary':
+        return Boundary(side, "wall", xs, ys, 0.0, 0.0, 0.0)
+    
+    @staticmethod
+    def concat(a:Union['Boundary', None], b: Union['Boundary', None]) -> 'Boundary':
+        assert a or b
+        if a is None: return b
+        if b is None: return a
+
+        xs = np.concatenate([a.xs, b.xs])
+        ys = np.concatenate([a.ys, b.ys])
+        valp = np.concatenate([a.valp, b.valp])
+        valu = np.concatenate([a.valu, b.valu])
+        valv = np.concatenate([a.valv, b.valv])
+        return Boundary(a.side, a.type, xs, ys, valp, valu, valv)
+    
+    @staticmethod
+    def to_dict(bounds:Iterable['Boundary']) -> Dict[str, 'Boundary']:
+        out:Dict['Boundary'] = dict()
+        for b in bounds:
+            name = b.type + b.side
+            out[name] = Boundary.concat(out.get(name), b)
+        return out
+    
+    @staticmethod
+    def export(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
+        pbs = dict()
+        ubs = dict()
+        vbs = dict()
+
+        bounds_dictified = Boundary.to_dict(bounds).values() if dictify else bounds
+        for b in bounds_dictified:
+            if b.type == "inflow" or b.type == "wall":
+                ptype = "der"
+                utype = "val"
+                vtype = "val"
+            elif b.type == "outflow":
+                ptype = "val"
+                utype = "der"
+                vtype = "der"
+            
+            pbs[ptype + b.side] = LowBound.concat(pbs.get(ptype + b.side), LowBound(b.side, ptype, b.xs, b.ys, b.valp))
+            ubs[utype + b.side] = LowBound.concat(ubs.get(utype + b.side), LowBound(b.side, utype, b.xs, b.ys, b.valu))
+            vbs[vtype + b.side] = LowBound.concat(vbs.get(vtype + b.side), LowBound(b.side, vtype, b.xs, b.ys, b.valv))
+
+        return (pbs, ubs, vbs)
+
+Boundaries = Dict[str, Boundary]
+
+# Expand functions take field and return a 2 bigger field padded with ghost cell values.
+# Also sets the values when directly on the boundary
+
+def bc_expand_velx(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
     out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
     out[1:-1, 1:-1] = f
-    return out
 
-def expand_velx_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
-    out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
-    out[1:-1, 1:-1] = f
-
-    for val, type, (x, y) in zip(bcs.values, bcs.types, bcs.indices + 1):
-        if False: None
-        elif type == BOUND_VAL_W:
+    for type_side, bc in bcs.items():
+        x, y, val = bc.xs+1, bc.ys+1, bc.value
+        # directly on the boundary
+        if type_side == "valW":
             out[x, y] = val
             out[x-1, y] = val
-        elif type == BOUND_VAL_E:
-            out[x, y] = val
+        elif type_side == "valE":
             out[x+1, y] = val
-        elif type == BOUND_VAL_S: out[x, y-1] = 2*val - out[x, y]
-        elif type == BOUND_VAL_N: out[x, y+1] = 2*val - out[x, y]
-        elif type == BOUND_DER_W: out[x-1, y] = out[x, y] - val*dx
-        elif type == BOUND_DER_E: out[x+1, y] = out[x, y] + val*dx
-        elif type == BOUND_DER_S: out[x, y-1] = out[x, y] - val*dy
-        elif type == BOUND_DER_N: out[x, y+1] = out[x, y] + val*dy
+            out[x+2, y] = val
+        # boundary between cells
+        elif type_side == "valS": out[x, y-1] = 2*val - out[x, y]
+        elif type_side == "valN": out[x, y+1] = 2*val - out[x, y]
+        # directly on the boundary, so that central der matches
+        elif type_side == "derW": out[x-1, y] = out[x+1, y] - 2*val*dx
+        elif type_side == "derE": out[x+2, y] = out[x,   y] + 2*val*dx
+        elif type_side == "derS": out[x, y-1] = out[x, y] - val*dy
+        elif type_side == "derN": out[x, y+1] = out[x, y] + val*dy
 
     return out
 
-def expand_vely_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
+def bc_expand_vely(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
     out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
     out[1:-1, 1:-1] = f
 
-    for val, type, (x, y) in zip(bcs.values, bcs.types, bcs.indices + 1):
-        if False: None
-        elif type == BOUND_VAL_W: out[x-1, y] = 2*val - out[x, y]
-        elif type == BOUND_VAL_E: out[x+1, y] = 2*val - out[x, y]
-        elif type == BOUND_VAL_S:
+    for type_side, bc in bcs.items():
+        x, y, val = bc.xs+1, bc.ys+1, bc.value
+        # boundary between cells
+        if type_side == "valW":   out[x-1, y] = 2*val - out[x, y]
+        elif type_side == "valE": out[x+1, y] = 2*val - out[x, y]
+        # directly on the boundary
+        elif type_side == "valS":
             out[x, y] = val
             out[x, y-1] = val
-        elif type == BOUND_VAL_N:
-            out[x, y] = val
+        elif type_side == "valN":
             out[x, y+1] = val
-        elif type == BOUND_DER_W: out[x-1, y] = out[x, y] - val*dx
-        elif type == BOUND_DER_E: out[x+1, y] = out[x, y] + val*dx
-        elif type == BOUND_DER_S: out[x, y-1] = out[x, y] - val*dy
-        elif type == BOUND_DER_N: out[x, y+1] = out[x, y] + val*dy
+            out[x, y+2] = val
+        elif type_side == "derW": out[x-1, y] = out[x, y] - val*dy
+        elif type_side == "derE": out[x+1, y] = out[x, y] + val*dy
+        # directly on the boundary, so that central der matches
+        elif type_side == "derS": out[x, y-1] = out[x, y+1] - 2*val*dx
+        elif type_side == "derN": out[x, y+2] = out[x, y  ] + 2*val*dx
 
     return out
 
-def apply_velx_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
-    flat_indices = np.where(bcs.types == BOUND_VAL_W or bcs.types == BOUND_VAL_E)
-    f[bcs.indices[flat_indices]] = bcs.values[flat_indices]
-    return f
-
-def apply_vely_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
-    flat_indices = np.where(bcs.types == BOUND_VAL_N or bcs.types == BOUND_VAL_S)
-    f[bcs.indices[flat_indices]] = bcs.values[flat_indices]
-    return f
-
-def expand_vels_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
-    return np.array((expand_velx_bcs(f[0], bcs[0]), expand_vely_bcs(f[1], bcs[1])))
-
-def apply_vels_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
-    apply_velx_bcs(f[0], bcs[0])
-    apply_vely_bcs(f[1], bcs[1])
-    return f
-
-expand_vel_bcs = (expand_velx_bcs, expand_vely_bcs)
-apply_vel_bcs = (apply_velx_bcs, apply_vely_bcs)
-
-def expand_cell_bcs(f:np.ndarray, bcs:Boundaries) -> np.ndarray:
+def bc_expand_cell(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
     out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
     out[1:-1, 1:-1] = f
 
-    for val, type, (x, y) in zip(bcs.values, bcs.types, bcs.indices + 1):
-        if False: None
-        elif type == BOUND_VAL_W: out[x-1, y] = 2*val - out[x, y]
-        elif type == BOUND_VAL_E: out[x+1, y] = 2*val - out[x, y]
-        elif type == BOUND_VAL_S: out[x, y-1] = 2*val - out[x, y]
-        elif type == BOUND_VAL_N: out[x, y+1] = 2*val - out[x, y]
-        elif type == BOUND_DER_W: out[x-1, y] = out[x, y] - val*dx
-        elif type == BOUND_DER_E: out[x+1, y] = out[x, y] + val*dx
-        elif type == BOUND_DER_S: out[x, y-1] = out[x, y] - val*dy
-        elif type == BOUND_DER_N: out[x, y+1] = out[x, y] + val*dy
+    for type_side, bc in bcs.items():
+        x, y, val = bc.xs+1, bc.ys+1, bc.value
+        if   type_side == "valW": out[x-1, y] = 2*val - out[x, y]
+        elif type_side == "valE": out[x+1, y] = 2*val - out[x, y]
+        elif type_side == "valS": out[x, y-1] = 2*val - out[x, y]
+        elif type_side == "valN": out[x, y+1] = 2*val - out[x, y]
+        elif type_side == "derW": out[x-1, y] = out[x, y] - val*dx
+        elif type_side == "derE": out[x+1, y] = out[x, y] + val*dx
+        elif type_side == "derS": out[x, y-1] = out[x, y] - val*dy
+        elif type_side == "derN": out[x, y+1] = out[x, y] + val*dy
 
     return out
+
+def bc_expand_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds]) -> np.ndarray:
+    return [bc_expand_velx(f[0], bcs[0]), bc_expand_vely(f[1], bcs[1])]
+
+# Only sets the values directly on the boundary
+def bc_apply_velx(f:np.ndarray, bcs:LowBounds, copy=True) -> np.ndarray:
+    if copy: f = f.copy()
+    if bc := bcs.get("valW"): 
+        f[bc.xs, bc.ys] = bc.value
+    if bc := bcs.get("valE"): 
+        f[bc.xs+1, bc.ys] = bc.value
+    return f
+
+def bc_apply_vely(f:np.ndarray, bcs:LowBounds, copy=True) -> np.ndarray:
+    if copy: f = f.copy()
+    if bc := bcs.get("valS"): f[bc.xs, bc.ys] = bc.value
+    if bc := bcs.get("valN"): f[bc.xs, bc.ys+1] = bc.value
+    return f
+
+def bc_apply_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds], copy=True) -> np.ndarray:
+    bc_apply_velx(f[0], bcs[0], copy=copy)
+    bc_apply_vely(f[1], bcs[1], copy=copy)
+    return f
+
+bc_expand_vel = (bc_expand_velx, bc_expand_vely)
+bc_apply_vel = (bc_apply_velx, bc_apply_vely)
+
+# Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
 def Dx(f:np.ndarray) -> np.ndarray: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
 def Dy(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
 
-def Dpx(f:np.ndarray) -> np.ndarray: return (f[2:  , 1:-1] - f[1:-1, 1:-1])/(dx)
-def Dnx(f:np.ndarray) -> np.ndarray: return (f[1:-1, 1:-1] - f[ :-2, 1:-1])/(dx)
-
-def Dpy(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:  ] - f[1:-1, 1:-1])/(dy)
-def Dny(f:np.ndarray) -> np.ndarray: return (f[1:-1, 1:-1] - f[1:-1,  :-2])/(dy)
-
-def DDx(f:np.ndarray) -> np.ndarray:
-    return (f[2:, 1:-1] - f[1:-1, 1:-1] + f[:-2, 1:-1])/dx**2
-
-def DDy(f:np.ndarray) -> np.ndarray:
-    return (f[1:-1, 2:] - f[1:-1, 1:-1] + f[1:-1, :-2])/dy**2
+def DDx(f:np.ndarray) -> np.ndarray: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
+def DDy(f:np.ndarray) -> np.ndarray: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
 
 D = (Dx, Dy)
 DD = (DDx, DDy)
-Dp = (Dpx, Dpy)
-Dn = (Dnx, Dny)
 
-def Lap(exp:np.ndarray)   -> np.ndarray: return DDx(exp) + DDy(exp)
-def Div(exp:np.ndarray)   -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
-def Divp(exp:np.ndarray)  -> np.ndarray: return Dpx(exp[0]) + Dpy(exp[1])
-def Divn(exp:np.ndarray)  -> np.ndarray: return Dnx(exp[0]) + Dny(exp[1])
-def Grad(exp:np.ndarray)  -> np.ndarray: return np.array((Dx(exp), Dy(exp)))
-def Gradp(exp:np.ndarray) -> np.ndarray: return np.array((Dpx(exp), Dpy(exp)))
-def Gradn(exp:np.ndarray) -> np.ndarray: return np.array((Dnx(exp), Dny(exp)))
+def Grad(exp:np.ndarray)-> np.ndarray: return [Dx(exp),  Dy(exp)]
+def Div(exp:np.ndarray) -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
+def Lap(exp:np.ndarray|List[np.ndarray]) -> np.ndarray: 
+    if isinstance(exp, list):
+        return [Lap(exp[0]), Lap(exp[1])]
+    return DDx(exp) + DDy(exp)
 
-def matrix_free_solve(A:typing.Callable, b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> typing.Tuple[np.ndarray, int]:
-    Aoff = A
-    Boff = b
-    if expandOffset:
-        offset = A(np.zeros_like(b))
-        Aoff = lambda x: A(x) - offset
-        Boff = b - offset
+def matrix_free_solve(A:Callable, b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
+    offset = A(np.zeros_like(b))
+    Aoff = lambda x: (A(x.reshape(b.shape)) - offset).flat
+    Boff = (b - offset).flat
 
-    Aop = sp.sparse.linalg.LinearOperator((len(b), len(b)), matvec=Aoff)
-    return sp.sparse.linalg.cgs(Aop, Boff, x0=x0, rtol=rtol, maxiter=maxiter)
+    Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
+    xflat = x0.flat if x0 is not None else None
+    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, maxiter=maxiter)
+    if iters == 0:
+        return xN.reshape(b.shape), iters
+    else:
+        return np.zeros_like(b), iters
 
-def step(un:np.ndarray, pn:np.ndarray, u_bcs:Boundaries, p_bc:Boundaries, variant, rtol=1e-3, iters=1):
+def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rtol=1e-3, iters=1):
     # un_kn = A^-1(f_rhs - G*pn_k)
     # qn_kn = rho/dt*L^-1*D*un_kn
     # pn_kn = pn_k + qn_kn - mu/rho*D*un_kn
 
-    S = 0
+    S = [0, 0] #source terms
     unk = un
     pnk = pn #todo guess
     for k in range(iters):
-        predU = np.empty_like(unk)
-        for i in range(2):
-            def predA(u:np.ndarray) -> np.ndarray:
-                nonlocal i
-                nonlocal unk
-                nonlocal u_bcs
 
-                ue = expand_vel_bcs[i](u, u_bcs[i])
-                U = 1/dt*u + unk*Grad(ue) - nu*Lap(ue)
-                return apply_vel_bcs[i](U, u_bcs[i])
+        pGrad = [0, 0]
+        if variant != "non-increment":
+            pexp = bc_expand_cell(pnk, BCp)
+            pGrad[0] = np.diff(pexp[:,1:-1], n=1, axis=0)/dx
+            pGrad[1] = np.diff(pexp[1:-1,:], n=1, axis=1)/dy 
             
-            pGrad = Dp[i](expand_cell_bcs(pnk, p_bc)) if variant != "non-increment" else 0
-            predB = 1/dt*un[i] + S - pGrad
-            predU[i], predIters = matrix_free_solve(predA, predB, x0=un[i], rtol=rtol)
-            assert predIters == 0
-        apply_vels_bcs(predU)
+        # predU = bc_apply_vels(un, BCu)
+        predU = [None, None]
+        for d in range(2):
+            def predA(u:np.ndarray) -> np.ndarray:
+                nonlocal d, unk, BCu
 
-        div_predU = Divn(expand_vels_bcs(predU, u_bcs))
-        def corrA(p:np.ndarray):
-            nonlocal p_bc
-            return Lap(expand_cell_bcs(p, p_bc))
-        
-        corrB = 1/dt*div_predU
+                uexp = bc_expand_vel[d](u, BCu[d])
+                adv = unk[d]*DD[d](uexp)
+                dif = nu*Lap(uexp)
+                U = 1/dt*u + adv - dif
+                bc_apply_vel[d](U, BCu[d], copy=False)
+                return U
+
+            predB = 1/dt*un[d] + S[d] - pGrad[d]
+            bc_apply_vel[d](predB, BCu[d], copy=False)
+
+            predU[d], predIters = matrix_free_solve(predA, predB, x0=un[d], rtol=rtol)
+            assert predIters == 0
+            bc_apply_vel[d](predU[d], BCu[d], copy=False) 
+
+        predUDiv = 0 
+        predUDiv += np.diff(predU[0], n=1, axis=0)/dx
+        predUDiv += np.diff(predU[1], n=1, axis=1)/dy 
+
+        corrA = lambda p: Lap(bc_expand_cell(p, BCp))
+        corrB = 1/dt*predUDiv
         corrP, corrIters = matrix_free_solve(corrA, corrB)
         assert corrIters == 0
 
-        u_next = predU - dt*Gradp(expand_cell_bcs(corrP, p_bc))
-        apply_vels_bcs(u_next, u_bcs)
+        corrPexp = bc_expand_cell(corrP, BCp)
+        corrPGrad = [None, None]
+        corrPGrad[0] = np.diff(corrPexp[:,1:-1], n=1, axis=0)/dx
+        corrPGrad[1] = np.diff(corrPexp[1:-1,:], n=1, axis=1)/dy 
+        
+        u_next = [None, None]
+        u_next[0] = predU[0] - dt*corrPGrad[0]
+        u_next[1] = predU[1] - dt*corrPGrad[1]
+        bc_apply_vels(u_next, BCu, copy=False)
+
+        predULap = Lap(bc_expand_vels(predU, BCu))
+        u_nextLap = Lap(bc_expand_vels(u_next, BCu))
 
         if   variant == "non-increment":    p_next = corrP
         elif variant == "increment":        p_next = pnk + corrP
-        elif variant == "increment-rot":    p_next = pnk + corrP - nu*div_predU
+        elif variant == "increment-rot":    p_next = pnk + corrP - nu*predUDiv
 
         unk = u_next
         pnk = p_next
 
     # todo filter
+    assert un[0].shape == unk[0].shape
+    assert un[1].shape == unk[1].shape
+    assert pnk.shape == pnk.shape
     return (unk, pnk)
 
 
-def graph():
-    global inflow_ux
+def main():
+    # PARAM SETTING
+    global nx, ny, nu, Lx, Ly, dx, dy, dt
+    nx = 20 #num cells
+    ny = 10 
+    nu = 1.3059e-2 #viscosity
+    Ly = 1 #size of domain in meters
+    Lx = Ly*nx/ny 
+    dx = Lx/nx
+    dy = Ly/ny
+    dt = 2e-2
+    t0 = 0
+    t1 = 1
+    nolinear_iters = 1
 
-    # Setup
-    cell_centers = (np.arange(N) + 0.5)*(L/N)
-    face_positions = np.arange(N+1)*(L/N)
+    dd = min(dx, dy)
+    ARROW_SCALE = 1/dd
 
-    p = np.zeros(N) + ini_p
-    u = np.zeros(N+1) + ini_ux
+    domain = "channel"
+    # domain = "cavity"
+    # domain = "channel_cavity"
 
-    plt.ion()  # Turn on interactive mode
-    # plt.tight_layout()
+    variant = "non-increment"
+    # variant = "increment"
+    # variant = "increment-rot"
 
-    fig, (ax_ux, ax_p, ax_stats) = plt.subplots(3, 1, figsize=(8, 6), sharex=True)
+    example_fields = False
+    # example_fields = True
 
-    u_cells, = ax_ux.plot(face_positions, u, label='u')
-    # u_faces, = ax_ux.plot(face_positions, faces_avg_ux, 's', label='ux faces')
+    # initial conditions
+    @dataclass
+    class Fields:
+        p:np.ndarray
+        u:np.ndarray
+        v:np.ndarray
 
-    ax_ux.set_ylim(0, 2)
-    ax_ux.set_xlabel('x')
-    ax_ux.set_ylabel('ux')
-    ax_ux.legend()
-    ax_ux.grid(True)
+    fields = Fields(
+        p = np.zeros((nx, ny)),
+        u = np.zeros((nx+1, ny)),
+        v = np.zeros((nx, ny+1))
+    )
 
-    p_cells, = ax_p.plot(cell_centers, p, label='p')
-    # p_faces, = ax_p.plot(face_positions, faces_avg_p, 's', label='ro faces')
+    #grid params
+    x_centers = (np.arange(nx) + 0.5) * dx
+    y_centers = (np.arange(ny) + 0.5) * dy
+    Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
 
-    ax_p.set_ylim(0, 2)
-    ax_p.set_xlabel('x')
-    ax_p.set_ylabel('p')
-    ax_p.legend()
-    ax_p.grid(True)
+    xfu = np.arange(nx + 1) * dx
+    yfu = (np.arange(ny) + 0.5) * dy
+    Xu, Yu = np.meshgrid(xfu, yfu, indexing='ij')
 
-    ax_text = ax_stats.text(0, 0.5, "", fontsize=12, ha='left', va='center')
-    ax_stats.axis('off')
+    xfv = (np.arange(nx) + 0.5) * dx
+    yfv = np.arange(ny + 1) * dy
+    Xv, Yv = np.meshgrid(xfv, yfv, indexing='ij')
 
-    SMOOTH_N = 10
-    alpha = 0.3
-    simple_loops = 1
-    simple_alpha = 1
-    iter = 0
-    t = dt
+    xfuex = (np.arange(nx+3) - 1) * dx
+    yfuex = (np.arange(ny+2) - 1 + 0.5) * dy
+    Xuex, Yuex = np.meshgrid(xfuex, yfuex, indexing='ij')
 
-    t_arr = []
-    div_u_arr = []
-    lap_p_arr = []
-    while t <= t1:
-        inflow_ux = min(1, t)
+    xfvex = (np.arange(nx+2) - 1 + 0.5) * dx
+    yfvex = (np.arange(ny+3) - 1) * dy
+    Xvex, Yvex = np.meshgrid(xfvex, yfvex, indexing='ij')
 
-        # variant = "non-increment"
-        # variant = "increment"
-        variant = "increment-rot"
-
-        # if iter % SMOOTH == 0: variant = "non-increment"
-        # else:                  variant = "increment"
-        # else:                  variant = "increment-rot"
-        BC_u = (dirichlet(inflow_ux), neumann(0))
-        BC_p = (neumann(0),           dirichlet(0))
-
-        u_next, p_next = step(u, p, BC_u, BC_p, variant=variant, rtol=1e-2, iters=simple_loops, alpha=simple_alpha)
-
-        # blended
-        # u_next_2, p_next_2 = step(u, p, BC_u, BC_p, variant="non-increment", rtol=1e-2)
-        # u_next = (1 - alpha)*u_next + alpha*u_next_2
-        # p_next = (1 - alpha)*p_next + alpha*p_next_2
-
-        u, u_next = u_next, u
-        p, p_next = p_next, p
-
-        div_u = np.linalg.norm(der_central(face_der(u, BC_u)))
-        lap_p = np.linalg.norm(der2_central(face_der(p, BC_p)))
-        t_arr.append(t)
-        div_u_arr.append(div_u)
-        lap_p_arr.append(lap_p)
-    
-        if iter % multistep == 0:
-            cfl = get_cfl(u)
-            Ma = get_mach_number(u)
-            stats = \
-                f"""
-                t = {float(t):.6} 
-                div(u) = {div_u:.4e} 
-                lap(p) = {lap_p:.4e} 
-                CFL = {cfl:.2} 
-                Ma = {Ma:.2}
-                """
-            
-            u_cells.set_ydata(u)
-            p_cells.set_ydata(p)
-            ax_ux.set_title(f"variant = {variant} iters = {simple_loops} t = {float(t):.6}")
-            ax_text.set_text(stats)
-
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-
-            # plt.pause(show_interval)
-
-        t += dt
+    # Main loop
+    fig = None
+    iter = -1
+    t = t0
+    while True:
         iter += 1
+        t = iter*dt
+        if t > t1:
+            break
+        
+        # BOUNDARIES ===============
+        if domain == "channel":
+            u_in = 0.5
+            # u_in = min(0.15, t)
+            # u_vals = u_in
+            u_vals = u_in*(1 - (2*y_centers/Ly - 1)**2)
+            boundaries = Boundary.to_dict([
+                Boundary.inflow("W", 0, np.arange(ny), u_vals, 0),
+                Boundary.outflow("E", nx-1, np.arange(ny)),
+                Boundary.wall("S", np.arange(nx), 0),
+                Boundary.wall("N", np.arange(nx), ny-1),
+            ])
+            for y in range(ny):
+                fields.u[:,y] = u_vals[y]
 
-    ax_stats.clear()
-    ax_stats.plot(t_arr, div_u_arr, label='div_u')
-    ax_stats.plot(t_arr, lap_p_arr, label='lap_p')
-    ax_stats.axis('on')
-    ax_stats.set_yscale('log')
+        elif domain == "cavity":
+            u_in = min(1, t)
+            boundaries = Boundary.to_dict([
+                Boundary.wall("W", 0, np.arange(ny)),
+                Boundary.wall("E", nx-1, np.arange(ny)),
+                Boundary.wall("S", np.arange(nx), 0),
+                Boundary.inflow("N", np.arange(nx), ny-1, u_in, 0),
+            ])
+        elif domain == "channel_cavity":
+            u_in = min(0.15, t)
+            boundaries = Boundary.to_dict([
+                Boundary.inflow("W", 0, np.arange(2*ny//3, ny), u_in, 0),
+                Boundary.wall("W", 0, np.arange(0, 2*ny//3)),
+                Boundary.wall("E", nx-1, np.arange(ny//3, ny)),
+                Boundary.outflow("E", nx-1, np.arange(0, ny//3)),
+                Boundary.wall("S", np.arange(nx), 0),
+                Boundary.wall("N", np.arange(nx), ny-1),
+            ])
+        else:
+            assert False
 
-    ax_stats.minorticks_on()
-    ax_stats.yaxis.set_major_locator(matplotlib.ticker.LogLocator(base=10.0, numticks=10))
-    ax_stats.yaxis.set_minor_locator(matplotlib.ticker.LogLocator(base=10.0, subs=[2, 5], numticks=100))
-    ax_stats.grid(which='major', linewidth=0.9)
-    ax_stats.grid(which='minor', linewidth=0.5, linestyle=':')
+        BCp, BCu, BCv = Boundary.export(boundaries.values(), dictify=False)
 
-    ax_stats.legend()
+        # SIMULATE ============================
+        if example_fields:
+            fields.u = 0.6*np.sin(np.pi * Yu/(ny * dy)) + 0.2*(0.5 - Xu/(nx * dx))
+            fields.v = 0.6*np.cos(np.pi * Xv/(nx * dx)) + 0.2*(0.5 - Yv/(ny * dy))
+            fields.p = np.sin(np.pi * Xc/(nx * dx)) * np.cos(np.pi * Yc/(ny * dy))
+        else:
+            u_next, p_next = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, variant=variant, iters=nolinear_iters)
+            fields.u = u_next[0]
+            fields.v = u_next[1]
+            fields.p = p_next
 
-    plt.ioff()  # Turn off interactive mode after loop ends
+        #PLOTTING ============================
+        pex = bc_expand_cell(fields.p, BCp)
+        uex = bc_expand_velx(fields.u, BCu)
+        vex = bc_expand_vely(fields.v, BCv)
+
+        if fig is None:
+            plt.ion()
+            fig = plt.figure()
+
+        fig.clf()
+        ax = fig.add_subplot(111)
+        ax.set_xlim(-dx, (nx + 1) * dx)
+        ax.set_ylim(-dy, (ny + 1) * dy)
+        ax.set_aspect('equal')
+        ax.set_title(f"variant = {variant} iter = {iter} t = {float(t):.6}")
+
+        # pressure
+        im = ax.imshow(pex.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+
+        # velocity arrows
+        YuexStaggered = Yuex.copy()
+        YuexStaggered[1::2,:] -= 0.05*dy
+        YuexStaggered[0::2,:] += 0.05*dy
+
+        XvexStaggered = Xvex.copy()
+        XvexStaggered[:,1::2] -= 0.05*dx
+        XvexStaggered[:,0::2] += 0.05*dx
+        ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+        ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+        
+        # markers for cell centers and faces
+        # ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
+        ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
+        ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
+
+        # boundaries
+        for b in boundaries.values():
+            @dataclass
+            class BoundRenderInfo: 
+                dim:str
+                n:list #normal, tangential direction
+                t:list 
+                ddn:float  #dx or dy in normal or tan dir
+                ddt:float 
+                xs:np.ndarray #bottom left point of boundary face x,y
+                ys:np.ndarray
+                
+            if b.side == "W": info = BoundRenderInfo("x", [-1, 0], [0, 1], dx, dy, b.xs, b.ys)
+            if b.side == "E": info = BoundRenderInfo("x", [1, 0], [0, -1], dx, dy, b.xs+1, b.ys)
+            if b.side == "S": info = BoundRenderInfo("y", [0, -1], [1, 0], dy, dx, b.xs, b.ys)
+            if b.side == "N": info = BoundRenderInfo("y", [0, 1], [-1, 0], dy, dx, b.xs, b.ys+1)
+
+            n, t = np.array(info.n), np.array(info.t)
+            xs, ys = info.xs, info.ys
+            ddn, ddt = info.ddn, info.ddt
+            vx, vy = b.valu, b.valv
+            v = np.vstack((vx, vy)).T 
+
+            coords = np.array([xs, ys]).T
+            dx_dy = np.array([dx, dy])
+            # face edges, face center
+            e1 = coords * dx_dy
+            e2 = (coords + np.abs(info.t)) * dx_dy
+            ec = (e1 + e2) / 2
+
+            if b.type == "wall":
+                xs = np.array([e1[:, 0], e2[:, 0]]).T
+                ys = np.array([e1[:, 1], e2[:, 1]]).T
+                ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4)
+
+            if b.type == "inflow":
+                if np.all(v*n == 0):
+                    soffx, soffy = ec[:,0], ec[:,1]
+                    if info.dim == "y": 
+                        soffy[0::2] += 0.1*ddn
+                        soffy[1::2] += 0.05*ddn
+                    if info.dim == "x": 
+                        soffx[0::2] += 0.1*ddn
+                        soffx[1::2] += 0.05*ddn
+                    ax.quiver(soffx, soffy, vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+
+                    xs = np.array([e1[:, 0], e2[:, 0]]).T
+                    ys = np.array([e1[:, 1], e2[:, 1]]).T
+                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=':', linewidth=1.5)
+                else:
+                    for off in np.linspace(-0.4, 0.4, 5)*ddt:
+                        o = ec-v*dd + off*t
+                        ax.quiver(o[:,0], o[:,1], vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+
+            if b.type == "outflow":
+                offsets = [0, 0.1, 0.2]
+                styles = ["solid", "solid", "dotted"]
+                for i, off in enumerate(offsets):
+                    o1 = e1 + off*n*ddn
+                    o2 = e2 + off*n*ddn
+
+                    xs = np.array([o1[:, 0], o2[:, 0]]).T
+                    ys = np.array([o1[:, 1], o2[:, 1]]).T
+                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=styles[i], linewidth=1.5)
+
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label('pressure')
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+    plt.ioff()
     plt.show()
 
-graph()
+main()

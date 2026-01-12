@@ -7,6 +7,27 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Literal, Callable, Iterable, Union
 
+from platform import system
+def plt_maximize():
+    # See discussion: https://stackoverflow.com/questions/12439588/how-to-maximize-a-plt-show-window-using-python
+    backend = plt.get_backend()
+    cfm = plt.get_current_fig_manager()
+    if backend == "wxAgg":
+        cfm.frame.Maximize(True)
+    elif backend == "TkAgg":
+        if system() == "Windows":
+            cfm.window.state("zoomed")  # This is windows only
+        else:
+            cfm.resize(*cfm.window.maxsize())
+    elif backend == "QT4Agg":
+        cfm.window.showMaximized()
+    elif callable(getattr(cfm, "full_screen_toggle", None)):
+        if not getattr(cfm, "flag_is_max", None):
+            cfm.full_screen_toggle()
+            cfm.flag_is_max = True
+    else:
+        raise RuntimeError("plt_maximize() is not implemented for current backend:", backend)
+
 R_spec = 287
 T = 272 + 20
 c_sound = 343
@@ -105,13 +126,17 @@ class Boundary: #High level boundary for the whole simulation
         return out
     
     @staticmethod
-    def export(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
+    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
         pbs = dict()
         ubs = dict()
         vbs = dict()
 
         bounds_dictified = Boundary.to_dict(bounds).values() if dictify else bounds
         for b in bounds_dictified:
+            # if b.type == "wall": #todo rename
+            #     ptype = "der"
+            #     utype = "val" if b.side in ("E", "W") else "der"
+            #     vtype = "der" if b.side in ("E", "W") else "val"
             if b.type == "inflow" or b.type == "wall":
                 ptype = "der"
                 utype = "val"
@@ -223,14 +248,30 @@ def bc_apply_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds], copy=True) -> n
 bc_expand_vel = (bc_expand_velx, bc_expand_vely)
 bc_apply_vel = (bc_apply_velx, bc_apply_vely)
 
+
+
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
+# interpolate (for Ix: input x field, output interpolated to y field for Iy in reverse)
+def Ix(f:np.ndarray) -> np.ndarray: 
+    # base to match shapes: [1:-1, 1:-1] -> [1:-2,1:]
+    # interp between [0, -1], [0, 0], [1, -1], [1, 0] thus the below ranges (add to base shape)
+    return 1/4*(f[1:-2,:-1] + f[1:-2,1:] + f[2:-1,:-1] + f[2:-1, 1:])
+def Iy(f:np.ndarray) -> np.ndarray: 
+    # base to match shapes: [1:-1, 1:-1] -> [1:,1:-2]
+    # interp between [-1, 0], [0, 0], [-1, 1], [0, 1] thus the below ranges (add to base shape)
+    # should be just transposed Ix shapes!
+    return 1/4*(f[:-1,1:-2] + f[1:,1:-2] + f[:-1,2:-1] + f[1:,2:-1])
+
+# first derivative
 def Dx(f:np.ndarray) -> np.ndarray: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
 def Dy(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
 
+# second derivative
 def DDx(f:np.ndarray) -> np.ndarray: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
 def DDy(f:np.ndarray) -> np.ndarray: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
 
+I = (Ix, Iy)
 D = (Dx, Dy)
 DD = (DDx, DDy)
 
@@ -270,25 +311,40 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
             pGrad[0] = np.diff(pexp[:,1:-1], n=1, axis=0)/dx
             pGrad[1] = np.diff(pexp[1:-1,:], n=1, axis=1)/dy 
             
-        # predU = bc_apply_vels(un, BCu)
-        predU = [None, None]
-        for d in range(2):
-            def predA(u:np.ndarray) -> np.ndarray:
-                nonlocal d, unk, BCu
+        unkexp = bc_expand_vels(unk, BCu)
+        unkinterp = [I[0](unkexp[0]), I[1](unkexp[1])]
+            
+        predU = bc_apply_vels(un, BCu)
+        if True:
+            # predU = [None, None]
+            # for d in range(2):
+            # if True:
+                d = 0
+                def predA(u:np.ndarray) -> np.ndarray:
+                    nonlocal d, unk, BCu
+                    tan = 1-d
 
-                uexp = bc_expand_vel[d](u, BCu[d])
-                adv = unk[d]*DD[d](uexp)
-                dif = nu*Lap(uexp)
-                U = 1/dt*u + adv - dif
-                bc_apply_vel[d](U, BCu[d], copy=False)
-                return U
+                    uexp = bc_expand_vel[d](u, BCu[d])
+                    utan = unkinterp[tan]
 
-            predB = 1/dt*un[d] + S[d] - pGrad[d]
-            bc_apply_vel[d](predB, BCu[d], copy=False)
+                    advn = unk[d]*DD[d](uexp) #normal dir
+                    advt = utan*DD[tan](uexp) #tangential dir
+                    adv = advn + advt
+                    adv = 0
 
-            predU[d], predIters = matrix_free_solve(predA, predB, x0=un[d], rtol=rtol)
-            assert predIters == 0
-            bc_apply_vel[d](predU[d], BCu[d], copy=False) 
+                    dif = nu*Lap(uexp)
+                    U = 1/dt*u + adv - dif
+                    bc_apply_vel[d](U, BCu[d], copy=False)
+                    return U
+
+                predB = 1/dt*un[d] + S[d] - pGrad[d]
+                bc_apply_vel[d](predB, BCu[d], copy=False)
+
+                predU[d], predIters = matrix_free_solve(predA, predB, x0=un[d], rtol=rtol)
+                if predIters != 0:
+                    print("Predictor diverged!")
+                    return (unk, pnk)
+                bc_apply_vel[d](predU[d], BCu[d], copy=False) 
 
         predUDiv = 0 
         predUDiv += np.diff(predU[0], n=1, axis=0)/dx
@@ -297,7 +353,9 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
         corrA = lambda p: Lap(bc_expand_cell(p, BCp))
         corrB = 1/dt*predUDiv
         corrP, corrIters = matrix_free_solve(corrA, corrB)
-        assert corrIters == 0
+        if corrIters != 0:
+            print("Corrector diverged!")
+            return (unk, pnk)
 
         corrPexp = bc_expand_cell(corrP, BCp)
         corrPGrad = [None, None]
@@ -309,13 +367,11 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
         u_next[1] = predU[1] - dt*corrPGrad[1]
         bc_apply_vels(u_next, BCu, copy=False)
 
-        predULap = Lap(bc_expand_vels(predU, BCu))
-        u_nextLap = Lap(bc_expand_vels(u_next, BCu))
-
         if   variant == "non-increment":    p_next = corrP
         elif variant == "increment":        p_next = pnk + corrP
         elif variant == "increment-rot":    p_next = pnk + corrP - nu*predUDiv
 
+        # u_next = predU
         unk = u_next
         pnk = p_next
 
@@ -329,23 +385,22 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
 def main():
     # PARAM SETTING
     global nx, ny, nu, Lx, Ly, dx, dy, dt
-    nx = 20 #num cells
-    ny = 10 
-    nu = 1.3059e-2 #viscosity
+    nx = 30 #num cells
+    ny = 30
+    nu = 1.3059e-1 #viscosity
     Ly = 1 #size of domain in meters
     Lx = Ly*nx/ny 
     dx = Lx/nx
     dy = Ly/ny
-    dt = 2e-2
+    dt = 4e-3
     t0 = 0
     t1 = 1
+    rtol = 1e-3
     nolinear_iters = 1
+    show_interval = 0.0
 
-    dd = min(dx, dy)
-    ARROW_SCALE = 1/dd
-
-    domain = "channel"
-    # domain = "cavity"
+    # domain = "channel"
+    domain = "cavity"
     # domain = "channel_cavity"
 
     variant = "non-increment"
@@ -354,6 +409,14 @@ def main():
 
     example_fields = False
     # example_fields = True
+
+    display_field = "p"
+    # display_field = "u"
+    # display_field = "v"
+    # display_field = "velocitymag"
+
+    dd = min(dx, dy)
+    ARROW_SCALE = 1/dd
 
     # initial conditions
     @dataclass
@@ -401,21 +464,22 @@ def main():
         
         # BOUNDARIES ===============
         if domain == "channel":
-            u_in = 0.5
-            # u_in = min(0.15, t)
-            # u_vals = u_in
-            u_vals = u_in*(1 - (2*y_centers/Ly - 1)**2)
+            u_in = min(0.5, 10*t)
+            # u_in = 0.5
+            # u_vals = u_in*(1 - (2*y_centers/Ly - 1)**2)
+            u_vals = u_in
             boundaries = Boundary.to_dict([
                 Boundary.inflow("W", 0, np.arange(ny), u_vals, 0),
                 Boundary.outflow("E", nx-1, np.arange(ny)),
                 Boundary.wall("S", np.arange(nx), 0),
                 Boundary.wall("N", np.arange(nx), ny-1),
             ])
-            for y in range(ny):
-                fields.u[:,y] = u_vals[y]
+            # for y in range(ny):
+            #     fields.u[:,y] = u_vals[y]
 
         elif domain == "cavity":
-            u_in = min(1, t)
+            # u_in = min(1, t)
+            u_in = 0.5
             boundaries = Boundary.to_dict([
                 Boundary.wall("W", 0, np.arange(ny)),
                 Boundary.wall("E", nx-1, np.arange(ny)),
@@ -435,7 +499,7 @@ def main():
         else:
             assert False
 
-        BCp, BCu, BCv = Boundary.export(boundaries.values(), dictify=False)
+        BCp, BCu, BCv = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
         # SIMULATE ============================
         if example_fields:
@@ -455,7 +519,7 @@ def main():
 
         if fig is None:
             plt.ion()
-            fig = plt.figure()
+            fig = plt.figure(figsize=(12, 10), dpi=100)
 
         fig.clf()
         ax = fig.add_subplot(111)
@@ -464,8 +528,30 @@ def main():
         ax.set_aspect('equal')
         ax.set_title(f"variant = {variant} iter = {iter} t = {float(t):.6}")
 
-        # pressure
-        im = ax.imshow(pex.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+        # Field drawing
+        velx = (uex[1:,:] + uex[:-1,:])/2
+        vely = (vex[:,1:] + vex[:,:-1])/2
+        velMag = np.hypot(velx, vely)
+
+        if display_field == "p":
+            im = ax.imshow(pex.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label('pressure')
+
+        elif display_field == "u":
+            im = ax.imshow(velx.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label('velocity u')
+
+        elif display_field == "v":
+            im = ax.imshow(vely.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label('velocity v')
+
+        elif display_field == "velmag":
+            im = ax.imshow(velMag.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label('velocity magnitude')
 
         # velocity arrows
         YuexStaggered = Yuex.copy()
@@ -548,10 +634,9 @@ def main():
                     ys = np.array([o1[:, 1], o2[:, 1]]).T
                     ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=styles[i], linewidth=1.5)
 
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label('pressure')
         fig.canvas.draw()
         fig.canvas.flush_events()
+        time.sleep(show_interval) 
 
     plt.ioff()
     plt.show()

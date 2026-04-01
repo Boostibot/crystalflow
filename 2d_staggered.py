@@ -1,5 +1,4 @@
 import time
-import copy
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
@@ -12,7 +11,8 @@ T = 272 + 20
 c_sound = 343
 
 # Predeclared globals. The values are set in the main function
-nx, ny, nu, Lx, Ly, dx, dy, dt = 0, 0, 0, 0, 0, 0, 0, 0
+nx, ny, nu, rho, Lx, Ly, dx, dy, dt = 0, 0, 0, 0, 0, 0, 0, 0, 0
+rho = 1
 
 def get_cfl(u):
     return np.max(np.abs(u)*dt/dx)
@@ -80,8 +80,12 @@ class Boundary: #High level boundary for the whole simulation
         return Boundary(side, "outflow", xs, ys, 0.0, 0.0, 0.0)
     
     @staticmethod
-    def wall(side:Side, xs:int|np.ndarray, ys:int|np.ndarray) -> 'Boundary':
-        return Boundary(side, "wall", xs, ys, 0.0, 0.0, 0.0)
+    def noslip(side:Side, xs:int|np.ndarray, ys:int|np.ndarray) -> 'Boundary':
+        return Boundary(side, "noslip", xs, ys, 0.0, 0.0, 0.0)
+        
+    @staticmethod
+    def slip(side:Side, xs:int|np.ndarray, ys:int|np.ndarray) -> 'Boundary':
+        return Boundary(side, "slip", xs, ys, 0.0, 0.0, 0.0)
     
     @staticmethod
     def concat(a:Union['Boundary', None], b: Union['Boundary', None]) -> 'Boundary':
@@ -105,21 +109,21 @@ class Boundary: #High level boundary for the whole simulation
         return out
     
     @staticmethod
-    def export(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
+    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
         pbs = dict()
         ubs = dict()
         vbs = dict()
 
         bounds_dictified = Boundary.to_dict(bounds).values() if dictify else bounds
         for b in bounds_dictified:
-            if b.type == "inflow" or b.type == "wall":
+
+            if b.type == "inflow":      ptype, utype, vtype = "der", "val", "val"
+            if b.type == "outflow":     ptype, utype, vtype = "val", "der", "der"
+            if b.type == "noslip": ptype, utype, vtype = "der", "val", "val"
+            if b.type == "slip": 
                 ptype = "der"
-                utype = "val"
-                vtype = "val"
-            elif b.type == "outflow":
-                ptype = "val"
-                utype = "der"
-                vtype = "der"
+                utype = "val" if b.side in ("E", "W") else "der"
+                vtype = "der" if b.side in ("E", "W") else "val"
             
             pbs[ptype + b.side] = LowBound.concat(pbs.get(ptype + b.side), LowBound(b.side, ptype, b.xs, b.ys, b.valp))
             ubs[utype + b.side] = LowBound.concat(ubs.get(utype + b.side), LowBound(b.side, utype, b.xs, b.ys, b.valu))
@@ -216,48 +220,183 @@ def bc_apply_vely(f:np.ndarray, bcs:LowBounds, copy=True) -> np.ndarray:
     return f
 
 def bc_apply_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds], copy=True) -> np.ndarray:
-    bc_apply_velx(f[0], bcs[0], copy=copy)
-    bc_apply_vely(f[1], bcs[1], copy=copy)
-    return f
+    u = bc_apply_velx(f[0], bcs[0], copy=copy)
+    v = bc_apply_vely(f[1], bcs[1], copy=copy)
+    return [u, v]
 
 bc_expand_vel = (bc_expand_velx, bc_expand_vely)
 bc_apply_vel = (bc_apply_velx, bc_apply_vely)
 
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
+# interpolate (for Ix: input x field, output interpolated to y field for Iy in reverse)
+def Ix(f:np.ndarray) -> np.ndarray: 
+    # base to match shapes: [1:-1, 1:-1] -> [1:-2,1:]
+    # interp between [0, -1], [0, 0], [1, -1], [1, 0] thus the below ranges (add to base shape)
+    return 1/4*(f[1:-2,:-1] + f[1:-2,1:] + f[2:-1,:-1] + f[2:-1, 1:])
+
+def Iy(f:np.ndarray) -> np.ndarray: 
+    # base to match shapes: [1:-1, 1:-1] -> [1:,1:-2]
+    # interp between [-1, 0], [0, 0], [-1, 1], [0, 1] thus the below ranges (add to base shape)
+    # should be just transposed Ix shapes!
+    return 1/4*(f[:-1,1:-2] + f[1:,1:-2] + f[:-1,2:-1] + f[1:,2:-1])
+
+# Interpolate velocity field to cell 
+# def ICx(f:np.ndarray) -> np.ndarray: return 1/2*(f[1:,:] + f[:-1,:])
+# def ICy(f:np.ndarray) -> np.ndarray: return 1/2*(f[:,1:] + f[:,:-1])
+
+def ICx(f:np.ndarray) -> np.ndarray: return f[:-1,:]
+def ICy(f:np.ndarray) -> np.ndarray: return f[:,:-1]
+
+# first derivative
 def Dx(f:np.ndarray) -> np.ndarray: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
 def Dy(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
 
+# first derivative upwind
+def Upwindx(f:np.ndarray, dir_f = None) -> np.ndarray: 
+    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
+    dxn = (f[1:-1, 1:-1] - f[:-2, 1:-1])/dx
+    dxp = (f[2:, 1:-1] - f[1:-1, 1:-1])/dx
+    mask = (dir_f >= 0)
+    return np.where(mask, dxn, dxp)
+
+def Upwindy(f:np.ndarray, dir_f = None) -> np.ndarray: 
+    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
+    dxn = (f[1:-1, 1:-1] - f[1:-1, :-2])/dy
+    dxp = (f[1:-1, 2:] - f[1:-1, 1:-1])/dy
+    mask = (dir_f >= 0)
+    return np.where(mask, dxn, dxp)
+
+def Pecletx(f:np.ndarray) -> np.ndarray: return rho*f*dx/nu 
+def Peclety(f:np.ndarray) -> np.ndarray: return rho*f*dy/nu 
+Peclet = (Pecletx, Peclety)
+
+def Blend12(f:np.ndarray, d, dir_f = None) -> np.ndarray: 
+    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
+    # Pe = Peclet[d](dir_f)
+    upw = Upwind[d](f, dir_f)
+    cen = D[d](f)
+    # beta = 1/(1 + np.abs(Pe))
+    beta = 0.90
+    out = upw + beta*(cen - upw)
+    return out
+    
+def Blendx(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 0, dir_f)
+def Blendy(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 1, dir_f)
+    #u:    0 1 2 3 4 5 6 7 8
+    #r:      1 2 3 4 5 6 7    (ri = F(ui-1, ui, ui+1))
+    #psi     1 2 3 4 5 6 7    (psi = psi(ri))
+    #psi+1     2 3 4 5 6 7    (psi+1)
+
+    #left:   1 2 3 4 5 6 7    (lefti = psi*(ui - ui-1))
+    #left:   1 2 3 4 5 6      (trim)
+    #right:  1 2 3 4 5 6      (righti = psi+1(ui+2 - ui+1))
+    #F:      1 2 3 4 5 6
+    #DDx       2 3 4 5 6
+    
+def FluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray:
+    # N-2 size
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = (un[:-2,:] - un[1:-1,:])/(un[1:-1,:] - un[2:,:])
+    r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
+    psi = (r + np.abs(r)) / (1 + np.abs(r))
+
+    # N-3 size
+    uin = u[:-3, :]
+    ui = u[1:-2, :]
+    uip = u[2:-1, :]
+    uipp = u[3:, :]
+
+    # N-3
+    u_L = ui  + 0.5*psi[:-1,:]*(ui - uin)
+    u_R = uip - 0.5*psi[1:,:]*(uipp - uip)
+    u_up = np.where(un[1:-2] >= 0, u_L, u_R)
+    F = u_up
+
+    # N-4
+    Ddx = (F[1:, :] - F[:-1, :]) / dx
+    # Ddx = u_up[:-1,:]/dx
+
+    #N-2
+    # Fill in the rest with simple upwind
+    out = Upwindx(u, un[1:-1, 1:-1]) 
+    out[1:-1,:] = Ddx[:,1:-1]
+    return out
+
+def FluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray:
+    # N-2 size
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = (un[:,:-2] - un[:,1:-1])/(un[:,1:-1] - un[:,2:])
+    r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
+    psi = (r + np.abs(r)) / (1 + np.abs(r))
+
+    # N-3 size
+    uin = u[:,:-3]
+    ui = u[:,1:-2]
+    uip = u[:,2:-1]
+    uipp = u[:,3:]
+
+    # N-3
+    u_L = ui  + 0.5*psi[:,:-1]*(ui - uin)
+    u_R = uip - 0.5*psi[:,1:]*(uipp - uip)
+    u_up = np.where(un >= 0, u_L, u_R)
+    F = u_up
+
+    # N-4
+    Ddy = (F[:,1:] - F[:,:-1]) / dy
+
+    #N-2
+    # Fill in the rest with simple upwind
+    out = Upwindy(u, un[1:-1, 1:-1]) 
+    out[:,1:-1] = Ddy[1:-1,:]
+    return out
+
+def is_normal(x):
+    return np.any(np.isinf(x) | np.isnan(x)) == False
+
+# second derivative
 def DDx(f:np.ndarray) -> np.ndarray: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
 def DDy(f:np.ndarray) -> np.ndarray: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
 
-D = (Dx, Dy)
+I  = (Ix,  Iy)
+IC = (ICx, ICy)
+D  = (Dx,  Dy)
 DD = (DDx, DDy)
+Upwind = (Upwindx, Upwindy)
+Blend = (Blendx, Blendy)
+FluxLimit = (FluxLimitx, FluxLimity)
 
 def Grad(exp:np.ndarray)-> np.ndarray: return [Dx(exp),  Dy(exp)]
-def Div(exp:np.ndarray) -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
+def Div(exp:List[np.ndarray]) -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
 def Lap(exp:np.ndarray|List[np.ndarray]) -> np.ndarray: 
     if isinstance(exp, list):
         return [Lap(exp[0]), Lap(exp[1])]
     return DDx(exp) + DDy(exp)
 
-def matrix_free_solve(A:Callable, b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
+def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
     offset = A(np.zeros_like(b))
     Aoff = lambda x: (A(x.reshape(b.shape)) - offset).flat
     Boff = (b - offset).flat
 
     Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
     xflat = x0.flat if x0 is not None else None
-    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, maxiter=maxiter)
+    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=1e-3, maxiter=maxiter)
     if iters == 0:
         return xN.reshape(b.shape), iters
     else:
         return np.zeros_like(b), iters
 
-def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rtol=1e-3, iters=1):
+def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str, rtol=1e-3, iters=1):
+    assert is_normal(un[0])
+    assert is_normal(un[1])
+    assert is_normal(pn)
+    
+
     # un_kn = A^-1(f_rhs - G*pn_k)
     # qn_kn = rho/dt*L^-1*D*un_kn
     # pn_kn = pn_k + qn_kn - mu/rho*D*un_kn
+
+    usteps = []
 
     S = [0, 0] #source terms
     unk = un
@@ -270,25 +409,67 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
             pGrad[0] = np.diff(pexp[:,1:-1], n=1, axis=0)/dx
             pGrad[1] = np.diff(pexp[1:-1,:], n=1, axis=1)/dy 
             
-        # predU = bc_apply_vels(un, BCu)
-        predU = [None, None]
+        unkexp = bc_expand_vels(unk, BCu)
+        unkinterp = [I[0](unkexp[0]), I[1](unkexp[1])]
+            
+        predU = bc_apply_vels(un, BCu)
+        # method = "upwind"
+        # method = "blend"
+        method = "fluxlimit"
+        # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - div(p)/rho + S
+        # Discrete t: 
+        # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - div(p)/rho + S
+        # un - u = - dt*dot(u, div(un)) + dt*nu*lap(un) - dt*div(p)/rho + dt*S
+        # un + dt*dot(u, div(un)) - dt*nu*lap(un) = u - dt*div(p)/rho + dt*S
         for d in range(2):
             def predA(u:np.ndarray) -> np.ndarray:
                 nonlocal d, unk, BCu
+                nonlocal usteps
+                tan = 1-d
 
+                usteps += [u]
+                utan = unkinterp[tan]
                 uexp = bc_expand_vel[d](u, BCu[d])
-                adv = unk[d]*DD[d](uexp)
+
+                if method == "central":
+                    advn = unk[d]*D[d](uexp) #normal dir
+                    advt = utan*D[tan](uexp) #tangential dir
+                if method == "upwind":
+                    advn = unk[d]*Upwind[d](uexp, unk[d]) #normal dir
+                    advt = utan*Upwind[tan](uexp, utan) #tangential dir
+                if method == "blend":
+                    advn = unk[d]*Blend[d](uexp, unk[d]) #normal dir
+                    advt = utan*Blend[tan](uexp, utan) #tangential dir
+                if method == "fluxlimit":
+                    advn = unk[d]*FluxLimit[d](uexp, unkexp[d]) #normal dir
+                    advt = utan*Blend[tan](uexp, utan) #tangential dir
+                adv = advn + advt
+
                 dif = nu*Lap(uexp)
-                U = 1/dt*u + adv - dif
-                bc_apply_vel[d](U, BCu[d], copy=False)
+                U = u + dt*adv - dt*dif
+                U = bc_apply_vel[d](U, BCu[d], copy=False)
+
+                if is_normal(uexp) == False:
+                    step(un, pn, BCu, BCp, variant)
+
+                assert is_normal(uexp)
+                assert is_normal(utan)
+                assert is_normal(advn)
+                assert is_normal(advt)
+                assert is_normal(U)
                 return U
 
-            predB = 1/dt*un[d] + S[d] - pGrad[d]
-            bc_apply_vel[d](predB, BCu[d], copy=False)
-
-            predU[d], predIters = matrix_free_solve(predA, predB, x0=un[d], rtol=rtol)
-            assert predIters == 0
-            bc_apply_vel[d](predU[d], BCu[d], copy=False) 
+            assert is_normal(un[0])
+            assert is_normal(un[1])
+            assert is_normal(pn)
+            unap = bc_apply_vel[d](un[d], BCu[d])
+            predB = unap - dt*pGrad[d]/rho + dt*S[d]
+            predU[d], predIters = matrix_free_solve(predA, predB, x0=unap, rtol=rtol)
+            retry_pred = False
+            if predIters != 0:
+                return (unk, pnk, np.zeros_like(pnk), np.zeros_like(pnk), [np.zeros_like(unk[0]), np.zeros_like(unk[1])])
+            
+            predU[d] = bc_apply_vel[d](predU[d], BCu[d], copy=False) 
 
         predUDiv = 0 
         predUDiv += np.diff(predU[0], n=1, axis=0)/dx
@@ -297,20 +478,26 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
         corrA = lambda p: Lap(bc_expand_cell(p, BCp))
         corrB = 1/dt*predUDiv
         corrP, corrIters = matrix_free_solve(corrA, corrB)
-        assert corrIters == 0
-
+        if corrIters != 0:
+            print("Corrector diverged!")
+            return (unk, pnk, predUDiv, corrP, predU)
+        
         corrPexp = bc_expand_cell(corrP, BCp)
+
         corrPGrad = [None, None]
         corrPGrad[0] = np.diff(corrPexp[:,1:-1], n=1, axis=0)/dx
         corrPGrad[1] = np.diff(corrPexp[1:-1,:], n=1, axis=1)/dy 
         
+        # corrPDiv = Lap(corrPexp)*dt
+        # deltaPred = predU[0] - unk[0]
+        # deltaCorr = -dt*corrPGrad[0]
+        # deltaPredNorm = np.sum(np.abs(deltaPred))
+        # deltaCorrNorm = np.sum(np.abs(deltaCorr))
+
         u_next = [None, None]
         u_next[0] = predU[0] - dt*corrPGrad[0]
         u_next[1] = predU[1] - dt*corrPGrad[1]
-        bc_apply_vels(u_next, BCu, copy=False)
-
-        predULap = Lap(bc_expand_vels(predU, BCu))
-        u_nextLap = Lap(bc_expand_vels(u_next, BCu))
+        u_next = bc_apply_vels(u_next, BCu, copy=False)
 
         if   variant == "non-increment":    p_next = corrP
         elif variant == "increment":        p_next = pnk + corrP
@@ -323,30 +510,69 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant, rt
     assert un[0].shape == unk[0].shape
     assert un[1].shape == unk[1].shape
     assert pnk.shape == pnk.shape
-    return (unk, pnk)
+    return (unk, pnk, predUDiv, corrP, predU)
 
+def test_flux_limit(): 
+    shape = (7, 6)
+    u = np.random.uniform(size=shape)*dx
+
+    # Flat velocity field => pure upwind everywhere
+    uflat = np.full(shape, 1)
+    upwind = Upwindx(u, uflat[1:-1, 1:-1])
+    fluxlim = FluxLimitx(u, uflat)
+    diff = np.max(np.abs(upwind - fluxlim))
+    assert diff <= 1e-4
+
+    # linear velocity field => pure central everywhere (except near boundaries)
+    ulin = np.linspace(1, 2, shape[0])[:, None] * np.ones((1, shape[1]))
+    central = Dx(u)
+    upwind = Upwindx(u, ulin[1:-1, 1:-1])
+    fluxlim = FluxLimitx(u, ulin)
+    expected = upwind
+    expected[1:-1, :] = central[1:-1, :] 
+    difff = np.abs(expected - fluxlim)
+    diff = np.max(np.abs(expected - fluxlim))
+    assert diff <= 1e-4
+
+    # a 50% ramp 50% flat => upwind and central in appropriate region
+    umixed = np.concat((uflat, ulin), axis=0) 
+    uu = np.concat((u, u), axis=0) 
+    fluxlim = FluxLimitx(uu, umixed)
+    fluxlim1 = fluxlim[1:shape[0]-1, :]
+    fluxlim2 = fluxlim[shape[0]+1:-1, :]
+
+    upwind = Upwindx(u, uflat[1:-1, 1:-1])
+    diff = np.max(np.abs(upwind - fluxlim1))
+    assert diff <= 1e-4
+
+    central = Dx(u)
+    diff = np.max(np.abs(upwind[1:-1, 1:-1] - fluxlim2[1:-1, 1:-1]))
+    assert diff <= 1e-4
 
 def main():
     # PARAM SETTING
     global nx, ny, nu, Lx, Ly, dx, dy, dt
     nx = 20 #num cells
-    ny = 10 
-    nu = 1.3059e-2 #viscosity
+    ny = 20
+    nu = 1.3059e-5 #viscosity
     Ly = 1 #size of domain in meters
     Lx = Ly*nx/ny 
     dx = Lx/nx
     dy = Ly/ny
-    dt = 2e-2
+    dt = 2e-3
     t0 = 0
-    t1 = 1
-    nolinear_iters = 1
+    t1 = 100
+    rtol = 1e-3
+    nolinear_iters = 1 
+    show_interval = 0
+    plot_every = 50
 
-    dd = min(dx, dy)
-    ARROW_SCALE = 1/dd
+    test_flux_limit()
 
-    domain = "channel"
+    # domain = "channel"
     # domain = "cavity"
-    # domain = "channel_cavity"
+    domain = "channel_cavity"
+    # domain = "real_cavity"
 
     variant = "non-increment"
     # variant = "increment"
@@ -354,6 +580,20 @@ def main():
 
     example_fields = False
     # example_fields = True
+
+    # display_field = "p"
+    # display_field = "u"
+    # display_field = "v"
+    display_field = "velmag"
+    # display_field = "predu"
+    # display_field = "predv"
+    # display_field = "predmag"
+    # display_field = "divpred"
+    # display_field = "corrpred"
+    # display_field = "lapcorrpred"
+
+    dd = min(dx, dy)
+    ARROW_SCALE = 1/dd
 
     # initial conditions
     @dataclass
@@ -399,159 +639,222 @@ def main():
         if t > t1:
             break
         
+        def parabolic_profile(u:float, n:int) -> np.ndarray:
+            # return np.full(n, u)
+
+            centers = (np.arange(n) + 0.5)/n
+            profile = u*(1 - (2*centers - 1)**2)
+            return profile
+
         # BOUNDARIES ===============
+        u_in = min(1, 10*t)
         if domain == "channel":
-            u_in = 0.5
-            # u_in = min(0.15, t)
-            # u_vals = u_in
-            u_vals = u_in*(1 - (2*y_centers/Ly - 1)**2)
+            inflow = u_in
+            inflow = parabolic_profile(u_in, ny)
+
             boundaries = Boundary.to_dict([
-                Boundary.inflow("W", 0, np.arange(ny), u_vals, 0),
+                Boundary.inflow("W", 0, np.arange(ny), inflow, 0),
                 Boundary.outflow("E", nx-1, np.arange(ny)),
-                Boundary.wall("S", np.arange(nx), 0),
-                Boundary.wall("N", np.arange(nx), ny-1),
+                Boundary.noslip("S", np.arange(nx), 0),
+                Boundary.noslip("N", np.arange(nx), ny-1),
             ])
-            for y in range(ny):
-                fields.u[:,y] = u_vals[y]
 
         elif domain == "cavity":
-            u_in = min(1, t)
             boundaries = Boundary.to_dict([
-                Boundary.wall("W", 0, np.arange(ny)),
-                Boundary.wall("E", nx-1, np.arange(ny)),
-                Boundary.wall("S", np.arange(nx), 0),
+                Boundary.noslip("W", 0, np.arange(ny)),
+                Boundary.noslip("E", nx-1, np.arange(ny)),
+                Boundary.noslip("S", np.arange(nx), 0),
                 Boundary.inflow("N", np.arange(nx), ny-1, u_in, 0),
             ])
-        elif domain == "channel_cavity":
-            u_in = min(0.15, t)
+        elif domain == "real_cavity":
+            gapW = 3
+            gapE = 2
+            # inflow = parabolic_profile(u_in, gapW)
+            inflow = u_in
             boundaries = Boundary.to_dict([
-                Boundary.inflow("W", 0, np.arange(2*ny//3, ny), u_in, 0),
-                Boundary.wall("W", 0, np.arange(0, 2*ny//3)),
-                Boundary.wall("E", nx-1, np.arange(ny//3, ny)),
-                Boundary.outflow("E", nx-1, np.arange(0, ny//3)),
-                Boundary.wall("S", np.arange(nx), 0),
-                Boundary.wall("N", np.arange(nx), ny-1),
+                Boundary.inflow("W", 0, np.arange(ny-gapW, ny), inflow, 0),
+                Boundary.noslip("W", 0, np.arange(0, ny-gapW)),
+                
+                Boundary.outflow("E", nx-1, np.arange(ny-gapE, ny)),
+                Boundary.slip("E", nx-1, np.arange(0, ny-gapE)),
+
+                Boundary.slip("N", np.arange(nx), ny-1),
+                Boundary.noslip("S", np.arange(nx), 0),
+            ])
+
+        elif domain == "channel_cavity":
+            inflow = u_in
+            gap = max(ny//5, 1)
+            inflow = parabolic_profile(u_in, gap)
+
+            boundaries = Boundary.to_dict([
+                Boundary.inflow("W", 0, np.arange(ny-gap, ny), inflow, 0),
+                Boundary.noslip("W", 0, np.arange(0, ny-gap)),
+                Boundary.slip("E", nx-1, np.arange(gap, ny)),
+                Boundary.outflow("E", nx-1, np.arange(0, gap)),
+                Boundary.noslip("S", np.arange(nx), 0),
+                Boundary.noslip("N", np.arange(nx), ny-1),
             ])
         else:
             assert False
 
-        BCp, BCu, BCv = Boundary.export(boundaries.values(), dictify=False)
+        BCp, BCu, BCv = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
+        step_out = [None, None, None, None]
         # SIMULATE ============================
         if example_fields:
             fields.u = 0.6*np.sin(np.pi * Yu/(ny * dy)) + 0.2*(0.5 - Xu/(nx * dx))
             fields.v = 0.6*np.cos(np.pi * Xv/(nx * dx)) + 0.2*(0.5 - Yv/(ny * dy))
             fields.p = np.sin(np.pi * Xc/(nx * dx)) * np.cos(np.pi * Yc/(ny * dy))
         else:
-            u_next, p_next = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, variant=variant, iters=nolinear_iters)
-            fields.u = u_next[0]
-            fields.v = u_next[1]
-            fields.p = p_next
+            # pass
+            step_out = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, variant=variant, iters=nolinear_iters)
+            fields.u = step_out[0][0]
+            fields.v = step_out[0][1]
+            fields.p = step_out[1]
 
         #PLOTTING ============================
-        pex = bc_expand_cell(fields.p, BCp)
-        uex = bc_expand_velx(fields.u, BCu)
-        vex = bc_expand_vely(fields.v, BCv)
+        if iter == 1 or iter % plot_every == 0:
+            pex = bc_expand_cell(fields.p, BCp)
+            uex = bc_expand_velx(fields.u, BCu)
+            vex = bc_expand_vely(fields.v, BCv)
 
-        if fig is None:
-            plt.ion()
-            fig = plt.figure()
+            if fig is None:
+                plt.ion()
+                fig = plt.figure(figsize=(12, 10), dpi=100)
 
-        fig.clf()
-        ax = fig.add_subplot(111)
-        ax.set_xlim(-dx, (nx + 1) * dx)
-        ax.set_ylim(-dy, (ny + 1) * dy)
-        ax.set_aspect('equal')
-        ax.set_title(f"variant = {variant} iter = {iter} t = {float(t):.6}")
+            fig.clf()
+            ax = fig.add_subplot(111)
+            ax.set_xlim(-dx, (nx + 1) * dx)
+            ax.set_ylim(-dy, (ny + 1) * dy)
+            ax.set_aspect('equal')
+            ax.set_title(f"variant = {variant} iter = {iter} t = {float(t):.6} cfl = {get_cfl(fields.u)}")
 
-        # pressure
-        im = ax.imshow(pex.T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+            # Field drawing
+            velx = ICx(uex)
+            vely = ICy(vex)
 
-        # velocity arrows
-        YuexStaggered = Yuex.copy()
-        YuexStaggered[1::2,:] -= 0.05*dy
-        YuexStaggered[0::2,:] += 0.05*dy
+            display_field_tuple = None
+            if   display_field == "p":          display_field_tuple = (pex, "pressure")
+            elif display_field == "u":          display_field_tuple = (velx, "velocity u")
+            elif display_field == "v":          display_field_tuple = (vely, "velocity v")
 
-        XvexStaggered = Xvex.copy()
-        XvexStaggered[:,1::2] -= 0.05*dx
-        XvexStaggered[:,0::2] += 0.05*dx
-        ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
-        ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
-        
-        # markers for cell centers and faces
-        # ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
-        ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
-        ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
+            elif display_field == "velmag":
+                display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
+            elif display_field == "predu":
+                display_field_tuple = (ICx(bc_expand_velx(step_out[4][0], BCu)), "predictor u")
+            elif display_field == "predv":
+                display_field_tuple = (ICy(bc_expand_vely(step_out[4][1], BCv)), "predictor v")
+            elif display_field == "predmag":
+                epred = bc_expand_vels(step_out[4], (BCu, BCv))
+                iepred = [ICx(epred[0]), ICy(epred[1])]
+                iepredmag = np.hypot(iepred[0], iepred[1])
+                display_field_tuple = (iepredmag, "predictor magnitude")
+            elif display_field == "divpred":
+                display_field_tuple = (bc_expand_cell(step_out[2], {}), "divpred")
+            elif display_field == "corrpred":
+                display_field_tuple = (bc_expand_cell(step_out[3], BCp), "corrpred")
+            elif display_field == "lapcorrpred":
+                corrpred_lap = bc_expand_cell(Lap(bc_expand_cell(step_out[3], BCp)), {})
+                display_field_tuple = (corrpred_lap, "corrpred lap")
 
-        # boundaries
-        for b in boundaries.values():
-            @dataclass
-            class BoundRenderInfo: 
-                dim:str
-                n:list #normal, tangential direction
-                t:list 
-                ddn:float  #dx or dy in normal or tan dir
-                ddt:float 
-                xs:np.ndarray #bottom left point of boundary face x,y
-                ys:np.ndarray
-                
-            if b.side == "W": info = BoundRenderInfo("x", [-1, 0], [0, 1], dx, dy, b.xs, b.ys)
-            if b.side == "E": info = BoundRenderInfo("x", [1, 0], [0, -1], dx, dy, b.xs+1, b.ys)
-            if b.side == "S": info = BoundRenderInfo("y", [0, -1], [1, 0], dy, dx, b.xs, b.ys)
-            if b.side == "N": info = BoundRenderInfo("y", [0, 1], [-1, 0], dy, dx, b.xs, b.ys+1)
+            if display_field_tuple is not None:
+                im = ax.imshow(display_field_tuple[0].T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
+                cbar = fig.colorbar(im, ax=ax)
+                cbar.set_label(display_field_tuple[1])
 
-            n, t = np.array(info.n), np.array(info.t)
-            xs, ys = info.xs, info.ys
-            ddn, ddt = info.ddn, info.ddt
-            vx, vy = b.valu, b.valv
-            v = np.vstack((vx, vy)).T 
+            # velocity arrows
+            YuexStaggered = Yuex.copy()
+            YuexStaggered[1::2,:] -= 0.05*dy
+            YuexStaggered[0::2,:] += 0.05*dy
 
-            coords = np.array([xs, ys]).T
-            dx_dy = np.array([dx, dy])
-            # face edges, face center
-            e1 = coords * dx_dy
-            e2 = (coords + np.abs(info.t)) * dx_dy
-            ec = (e1 + e2) / 2
+            XvexStaggered = Xvex.copy()
+            XvexStaggered[:,1::2] -= 0.05*dx
+            XvexStaggered[:,0::2] += 0.05*dx
+            ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+            ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+            
+            # markers for cell centers and faces
+            # ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
+            ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
+            ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
 
-            if b.type == "wall":
-                xs = np.array([e1[:, 0], e2[:, 0]]).T
-                ys = np.array([e1[:, 1], e2[:, 1]]).T
-                ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4)
+            # boundaries
+            for b in boundaries.values():
+                # TODO: get rid of this!
+                @dataclass
+                class BoundRenderInfo: 
+                    dim:str
+                    n:list #normal, tangential direction
+                    t:list 
+                    ddn:float  #dx or dy in normal or tan dir
+                    ddt:float 
+                    xs:np.ndarray #bottom left point of boundary face x,y
+                    ys:np.ndarray
+                    
+                if b.side == "W": info = BoundRenderInfo("x", [-1, 0], [0, 1], dx, dy, b.xs, b.ys)
+                if b.side == "E": info = BoundRenderInfo("x", [1, 0], [0, -1], dx, dy, b.xs+1, b.ys)
+                if b.side == "S": info = BoundRenderInfo("y", [0, -1], [1, 0], dy, dx, b.xs, b.ys)
+                if b.side == "N": info = BoundRenderInfo("y", [0, 1], [-1, 0], dy, dx, b.xs, b.ys+1)
 
-            if b.type == "inflow":
-                if np.all(v*n == 0):
-                    soffx, soffy = ec[:,0], ec[:,1]
-                    if info.dim == "y": 
-                        soffy[0::2] += 0.1*ddn
-                        soffy[1::2] += 0.05*ddn
-                    if info.dim == "x": 
-                        soffx[0::2] += 0.1*ddn
-                        soffx[1::2] += 0.05*ddn
-                    ax.quiver(soffx, soffy, vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+                n, t = np.array(info.n), np.array(info.t)
+                xs, ys = info.xs, info.ys
+                ddn, ddt = info.ddn, info.ddt
+                vx, vy = b.valu, b.valv
+                v = np.vstack((vx, vy)).T 
 
+                coords = np.array([xs, ys]).T
+                dx_dy = np.array([dx, dy])
+                # face edges, face center
+                e1 = coords * dx_dy
+                e2 = (coords + np.abs(info.t)) * dx_dy
+                ec = (e1 + e2) / 2
+
+                if b.type == "noslip":
                     xs = np.array([e1[:, 0], e2[:, 0]]).T
                     ys = np.array([e1[:, 1], e2[:, 1]]).T
-                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=':', linewidth=1.5)
-                else:
-                    for off in np.linspace(-0.4, 0.4, 5)*ddt:
-                        o = ec-v*dd + off*t
-                        ax.quiver(o[:,0], o[:,1], vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02)
+                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4)
 
-            if b.type == "outflow":
-                offsets = [0, 0.1, 0.2]
-                styles = ["solid", "solid", "dotted"]
-                for i, off in enumerate(offsets):
-                    o1 = e1 + off*n*ddn
-                    o2 = e2 + off*n*ddn
+                if b.type == "slip":
+                    xs = np.array([e1[:, 0], e2[:, 0]]).T
+                    ys = np.array([e1[:, 1], e2[:, 1]]).T
+                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4, linestyle=":")
 
-                    xs = np.array([o1[:, 0], o2[:, 0]]).T
-                    ys = np.array([o1[:, 1], o2[:, 1]]).T
-                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=styles[i], linewidth=1.5)
+                if b.type == "inflow":
+                    if np.all(v*n == 0):
+                        soffx, soffy = ec[:,0], ec[:,1]
+                        if info.dim == "y": 
+                            soffy[0::2] += 0.1*ddn
+                            soffy[1::2] += 0.05*ddn
+                        if info.dim == "x": 
+                            soffx[0::2] += 0.1*ddn
+                            soffx[1::2] += 0.05*ddn
+                        ax.quiver(soffx, soffy, vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
 
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label('pressure')
-        fig.canvas.draw()
-        fig.canvas.flush_events()
+                        xs = np.array([e1[:, 0], e2[:, 0]]).T
+                        ys = np.array([e1[:, 1], e2[:, 1]]).T
+                        ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=':', linewidth=1.5)
+                    else:
+                        for off in np.linspace(-0.4, 0.4, 5)*ddt:
+                            o = ec-v*dd + off*t
+                            ax.quiver(o[:,0], o[:,1], vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+
+                if b.type == "outflow":
+                    # offsets = [0, 0.1, 0.2]
+                    # styles = ["solid", "solid", "dotted"]
+                    
+                    offsets = [0, 0.2]
+                    styles = ["-", (0, (2, 3))]
+                    for style, off in zip(styles, offsets):
+                        o1 = e1 + off*n*ddn
+                        o2 = e2 + off*n*ddn
+
+                        xs = np.array([o1[:, 0], o2[:, 0]]).T
+                        ys = np.array([o1[:, 1], o2[:, 1]]).T
+                        ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=style, linewidth=1)
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+            time.sleep(show_interval) 
 
     plt.ioff()
     plt.show()

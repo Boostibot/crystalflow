@@ -1,4 +1,5 @@
 ignored/
+env/
 .vs/
 .vs
 x64/

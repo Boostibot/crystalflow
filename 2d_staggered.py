@@ -6,6 +6,27 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Literal, Callable, Iterable, Union
 
+from platform import system
+def plt_maximize():
+    # See discussion: https://stackoverflow.com/questions/12439588/how-to-maximize-a-plt-show-window-using-python
+    backend = plt.get_backend()
+    cfm = plt.get_current_fig_manager()
+    if backend == "wxAgg":
+        cfm.frame.Maximize(True)
+    elif backend == "TkAgg":
+        if system() == "Windows":
+            cfm.window.state("zoomed")  # This is windows only
+        else:
+            cfm.resize(*cfm.window.maxsize())
+    elif backend == "QT4Agg":
+        cfm.window.showMaximized()
+    elif callable(getattr(cfm, "full_screen_toggle", None)):
+        if not getattr(cfm, "flag_is_max", None):
+            cfm.full_screen_toggle()
+            cfm.flag_is_max = True
+    else:
+        raise RuntimeError("plt_maximize() is not implemented for current backend:", backend)
+
 R_spec = 287
 T = 272 + 20
 c_sound = 343
@@ -109,6 +130,7 @@ class Boundary: #High level boundary for the whole simulation
         return out
     
     @staticmethod
+    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
     def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
         pbs = dict()
         ubs = dict()
@@ -226,6 +248,8 @@ def bc_apply_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds], copy=True) -> n
 
 bc_expand_vel = (bc_expand_velx, bc_expand_vely)
 bc_apply_vel = (bc_apply_velx, bc_apply_vely)
+
+
 
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
@@ -524,6 +548,7 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str
         elif variant == "increment":        p_next = pnk + corrP
         elif variant == "increment-rot":    p_next = pnk + corrP - nu*predUDiv
 
+        # u_next = predU
         unk = u_next
         pnk = p_next
 
@@ -722,6 +747,7 @@ def main():
         else:
             assert False
 
+        BCp, BCu, BCv = Boundary.to_low_bounds(boundaries.values(), dictify=False)
         BCp, BCu, BCv = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
         step_out = [None, None, None, None]

@@ -271,35 +271,39 @@ def Pecletx(f:np.ndarray) -> np.ndarray: return rho*f*dx/nu
 def Peclety(f:np.ndarray) -> np.ndarray: return rho*f*dy/nu 
 Peclet = (Pecletx, Peclety)
 
-def Blend12(f:np.ndarray, d, dir_f = None) -> np.ndarray: 
+def Blend12(f:np.ndarray, d, dir_f = None, factor=0.97) -> np.ndarray: 
     dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
-    # Pe = Peclet[d](dir_f)
     upw = Upwind[d](f, dir_f)
     cen = D[d](f)
-    # beta = 1/(1 + np.abs(Pe))
-    beta = 0.90
-    out = upw + beta*(cen - upw)
+    out = upw + factor*(cen - upw)
     return out
     
 def Blendx(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 0, dir_f)
 def Blendy(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 1, dir_f)
-    #u:    0 1 2 3 4 5 6 7 8
-    #r:      1 2 3 4 5 6 7    (ri = F(ui-1, ui, ui+1))
-    #psi     1 2 3 4 5 6 7    (psi = psi(ri))
-    #psi+1     2 3 4 5 6 7    (psi+1)
-
-    #left:   1 2 3 4 5 6 7    (lefti = psi*(ui - ui-1))
-    #left:   1 2 3 4 5 6      (trim)
-    #right:  1 2 3 4 5 6      (righti = psi+1(ui+2 - ui+1))
-    #F:      1 2 3 4 5 6
-    #DDx       2 3 4 5 6
     
-def FluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray:
+bias = 0
+blend = 1
+def FakeFluxLimit12(u:np.ndarray, un:np.ndarray, d) -> np.ndarray:
+    with np.errstate(divide='ignore', invalid='ignore'):
+        if d == 0: r = (un[:-2,1:-1] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[2:,1:-1])
+        if d == 1: r = (un[1:-1,:-2] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[1:-1,2:])
+
+    r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
+    psi = (r + np.abs(r)) / (1 + np.abs(r))
+    psi = np.minimum(psi, 1.0)
+    factor = psi + bias*(blend - psi) 
+    return Blend12(u, d, un[1:-1,1:-1], factor=factor)
+    
+def FakeFluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray: return FakeFluxLimit12(u, un, 0)
+def FakeFluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray: return FakeFluxLimit12(u, un, 1)
+
+def FluxLimitx(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
     # N-2 size
     with np.errstate(divide='ignore', invalid='ignore'):
         r = (un[:-2,:] - un[1:-1,:])/(un[1:-1,:] - un[2:,:])
     r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
     psi = (r + np.abs(r)) / (1 + np.abs(r))
+    ai = 0.5*(a[1:,:] + a[:-1,:])
 
     # N-3 size
     uin = u[:-3, :]
@@ -310,20 +314,19 @@ def FluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray:
     # N-3
     u_L = ui  + 0.5*psi[:-1,:]*(ui - uin)
     u_R = uip - 0.5*psi[1:,:]*(uipp - uip)
-    u_up = np.where(un[1:-2] >= 0, u_L, u_R)
+    u_up = np.where(un[1:-2,:] >= 0, u_L, u_R)
     F = u_up
 
     # N-4
     Ddx = (F[1:, :] - F[:-1, :]) / dx
-    # Ddx = u_up[:-1,:]/dx
 
     #N-2
     # Fill in the rest with simple upwind
-    out = Upwindx(u, un[1:-1, 1:-1]) 
+    out = Upwindx(u, un[1:-1, 1:-1])
     out[1:-1,:] = Ddx[:,1:-1]
-    return out
+    return out*a[1:-1, 1:-1] 
 
-def FluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray:
+def FluxLimity(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
     # N-2 size
     with np.errstate(divide='ignore', invalid='ignore'):
         r = (un[:,:-2] - un[:,1:-1])/(un[:,1:-1] - un[:,2:])
@@ -336,10 +339,13 @@ def FluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray:
     uip = u[:,2:-1]
     uipp = u[:,3:]
 
+    # N-1 size
+    ai = 0.5*(a[:,1:] + a[:,:-1])
+    
     # N-3
     u_L = ui  + 0.5*psi[:,:-1]*(ui - uin)
     u_R = uip - 0.5*psi[:,1:]*(uipp - uip)
-    u_up = np.where(un >= 0, u_L, u_R)
+    u_up = np.where(un[:,1:-2] >= 0, u_L, u_R)
     F = u_up
 
     # N-4
@@ -347,9 +353,9 @@ def FluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray:
 
     #N-2
     # Fill in the rest with simple upwind
-    out = Upwindy(u, un[1:-1, 1:-1]) 
+    out = Upwindy(u, un[1:-1, 1:-1])*a[1:-1, 1:-1] 
     out[:,1:-1] = Ddy[1:-1,:]
-    return out
+    return out*a[1:-1, 1:-1] 
 
 def is_normal(x):
     return np.any(np.isinf(x) | np.isnan(x)) == False
@@ -365,6 +371,7 @@ DD = (DDx, DDy)
 Upwind = (Upwindx, Upwindy)
 Blend = (Blendx, Blendy)
 FluxLimit = (FluxLimitx, FluxLimity)
+FakeFluxLimit = (FakeFluxLimitx, FakeFluxLimity)
 
 def Grad(exp:np.ndarray)-> np.ndarray: return [Dx(exp),  Dy(exp)]
 def Div(exp:List[np.ndarray]) -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
@@ -390,7 +397,6 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str
     assert is_normal(un[0])
     assert is_normal(un[1])
     assert is_normal(pn)
-    
 
     # un_kn = A^-1(f_rhs - G*pn_k)
     # qn_kn = rho/dt*L^-1*D*un_kn
@@ -411,11 +417,18 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str
             
         unkexp = bc_expand_vels(unk, BCu)
         unkinterp = [I[0](unkexp[0]), I[1](unkexp[1])]
-            
+        unkinterpexp = [
+            bc_expand_vel[1](unkinterp[0], BCu[1]),
+            bc_expand_vel[0](unkinterp[1], BCu[0])
+        ]
+
         predU = bc_apply_vels(un, BCu)
+        # method = "central"
         # method = "upwind"
-        # method = "blend"
-        method = "fluxlimit"
+        method = "blend"
+        # method = "fakefluxlimit"
+        # method = "fakefluxlimit-both"
+        # method = "fluxlimit"
         # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - div(p)/rho + S
         # Discrete t: 
         # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - div(p)/rho + S
@@ -428,40 +441,48 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str
                 tan = 1-d
 
                 usteps += [u]
-                utan = unkinterp[tan]
+                utang = unkinterp[tan]
+                unorm = unk[d]
                 uexp = bc_expand_vel[d](u, BCu[d])
 
                 if method == "central":
-                    advn = unk[d]*D[d](uexp) #normal dir
-                    advt = utan*D[tan](uexp) #tangential dir
-                if method == "upwind":
-                    advn = unk[d]*Upwind[d](uexp, unk[d]) #normal dir
-                    advt = utan*Upwind[tan](uexp, utan) #tangential dir
-                if method == "blend":
-                    advn = unk[d]*Blend[d](uexp, unk[d]) #normal dir
-                    advt = utan*Blend[tan](uexp, utan) #tangential dir
-                if method == "fluxlimit":
-                    advn = unk[d]*FluxLimit[d](uexp, unkexp[d]) #normal dir
-                    advt = utan*Blend[tan](uexp, utan) #tangential dir
+                    advn = unorm*D[d](uexp) #normal dir
+                    advt = utang*D[tan](uexp) #tangential dir
+                elif method == "upwind":
+                    advn = unorm*Upwind[d](uexp, unorm) #normal dir
+                    advt = utang*Upwind[tan](uexp, utang) #tangential dir
+                elif method == "blend":
+                    advn = unorm*Blend[d](uexp, unorm) #normal dir
+                    advt = utang*Blend[tan](uexp, utang) #tangential dir
+                elif method == "fakefluxlimit":
+                    advn = unorm*FakeFluxLimit[d](uexp, unkexp[d]) #normal dir
+                    advt = utang*Blend[tan](uexp, utang) #tangential dir
+                elif method == "fakefluxlimit-both":
+                    advn = unorm*FakeFluxLimit[d](uexp, unkexp[d]) #normal dir
+                    advt = utang*FakeFluxLimit[tan](uexp, unkinterpexp[tan]) #tangential dir
+                elif method == "fluxlimit":
+                    advn = FluxLimit[d](uexp, unkexp[d], unkexp[d]) #normal dir
+                    advt = utang*Blend[tan](uexp, utang) #tangential dir
+                elif method == "fluxlimit-both":
+                    advn = FluxLimit[d](uexp, unkexp[d], unkexp[d]) #normal dir
+                    advt = FluxLimit[tan](uexp, unkinterpexp[tan], unkinterpexp[tan]) #tangential dir
                 adv = advn + advt
 
                 dif = nu*Lap(uexp)
                 U = u + dt*adv - dt*dif
                 U = bc_apply_vel[d](U, BCu[d], copy=False)
 
-                if is_normal(uexp) == False:
-                    step(un, pn, BCu, BCp, variant)
-
-                assert is_normal(uexp)
-                assert is_normal(utan)
-                assert is_normal(advn)
-                assert is_normal(advt)
-                assert is_normal(U)
+                # assert is_normal(uexp)
+                # assert is_normal(utang)
+                # assert is_normal(unorm)
+                # assert is_normal(advn)
+                # assert is_normal(advt)
+                # assert is_normal(U)
                 return U
 
-            assert is_normal(un[0])
-            assert is_normal(un[1])
-            assert is_normal(pn)
+            # assert is_normal(un[0])
+            # assert is_normal(un[1])
+            # assert is_normal(pn)
             unap = bc_apply_vel[d](un[d], BCu[d])
             predB = unap - dt*pGrad[d]/rho + dt*S[d]
             predU[d], predIters = matrix_free_solve(predA, predB, x0=unap, rtol=rtol)
@@ -513,7 +534,7 @@ def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str
     return (unk, pnk, predUDiv, corrP, predU)
 
 def test_flux_limit(): 
-    shape = (7, 6)
+    shape = (40, 20)
     u = np.random.uniform(size=shape)*dx
 
     # Flat velocity field => pure upwind everywhere
@@ -552,8 +573,8 @@ def test_flux_limit():
 def main():
     # PARAM SETTING
     global nx, ny, nu, Lx, Ly, dx, dy, dt
-    nx = 20 #num cells
-    ny = 20
+    nx = 40 #num cells
+    ny = 40
     nu = 1.3059e-5 #viscosity
     Ly = 1 #size of domain in meters
     Lx = Ly*nx/ny 
@@ -561,13 +582,13 @@ def main():
     dy = Ly/ny
     dt = 2e-3
     t0 = 0
-    t1 = 100
+    t1 = 6
     rtol = 1e-3
     nolinear_iters = 1 
     show_interval = 0
     plot_every = 50
 
-    test_flux_limit()
+    # test_flux_limit()
 
     # domain = "channel"
     # domain = "cavity"
@@ -591,6 +612,9 @@ def main():
     # display_field = "divpred"
     # display_field = "corrpred"
     # display_field = "lapcorrpred"
+    # display_field = "psiu"
+    # display_field = "psiv"
+    # display_field = "psimag"
 
     dd = min(dx, dy)
     ARROW_SCALE = 1/dd
@@ -757,6 +781,20 @@ def main():
             elif display_field == "lapcorrpred":
                 corrpred_lap = bc_expand_cell(Lap(bc_expand_cell(step_out[3], BCp)), {})
                 display_field_tuple = (corrpred_lap, "corrpred lap")
+            elif display_field in ["psiu", "psiv", "psimag"]:
+                ru = (uex[:-2,1:-1] - uex[1:-1,1:-1])/(uex[1:-1,1:-1] - uex[2:,1:-1])
+                rv = (vex[1:-1,:-2] - vex[1:-1,1:-1])/(vex[1:-1,1:-1] - vex[1:-1,2:])
+
+                psiu = np.zeros_like(uex)
+                psiu[1:-1, 1:-1] = np.minimum((ru + np.abs(ru)) / (1 + np.abs(ru)), 1)
+                
+                psiv = np.zeros_like(vex)
+                psiv[1:-1, 1:-1] = np.minimum((rv + np.abs(rv)) / (1 + np.abs(rv)), 1)
+                
+                ipsi = [ICx(psiu), ICy(psiv)]
+                if display_field == "psiu": display_field_tuple = (psiu, "psiu")
+                if display_field == "psiv": display_field_tuple = (psiv, "psiv")
+                if display_field == "psimag": display_field_tuple = (np.hypot(ipsi[0], ipsi[1]), "psimag")
 
             if display_field_tuple is not None:
                 im = ax.imshow(display_field_tuple[0].T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')

@@ -131,7 +131,6 @@ class Boundary: #High level boundary for the whole simulation
     
     @staticmethod
     def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
-    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
         pbs = dict()
         ubs = dict()
         vbs = dict()
@@ -141,7 +140,7 @@ class Boundary: #High level boundary for the whole simulation
 
             if b.type == "inflow":      ptype, utype, vtype = "der", "val", "val"
             if b.type == "outflow":     ptype, utype, vtype = "val", "der", "der"
-            if b.type == "noslip": ptype, utype, vtype = "der", "val", "val"
+            if b.type == "noslip":      ptype, utype, vtype = "der", "val", "val"
             if b.type == "slip": 
                 ptype = "der"
                 utype = "val" if b.side in ("E", "W") else "der"
@@ -157,6 +156,12 @@ Boundaries = Dict[str, Boundary]
 
 # Expand functions take field and return a 2 bigger field padded with ghost cell values.
 # Also sets the values when directly on the boundary
+
+def _bc_fill_corners_pipe(out:np.ndarray):
+    out[0,0] = out[0,1]
+    out[-1,0] = out[-1,1]
+    out[0,-1] = out[0,-2]
+    out[-1,-1] = out[-1,-2]
 
 def bc_expand_velx(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
     out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
@@ -180,6 +185,7 @@ def bc_expand_velx(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
         elif type_side == "derS": out[x, y-1] = out[x, y] - val*dy
         elif type_side == "derN": out[x, y+1] = out[x, y] + val*dy
 
+    _bc_fill_corners_pipe(out)
     return out
 
 def bc_expand_vely(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
@@ -204,6 +210,7 @@ def bc_expand_vely(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
         elif type_side == "derS": out[x, y-1] = out[x, y+1] - 2*val*dx
         elif type_side == "derN": out[x, y+2] = out[x, y  ] + 2*val*dx
 
+    _bc_fill_corners_pipe(out)
     return out
 
 def bc_expand_cell(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
@@ -221,6 +228,7 @@ def bc_expand_cell(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
         elif type_side == "derS": out[x, y-1] = out[x, y] - val*dy
         elif type_side == "derN": out[x, y+1] = out[x, y] + val*dy
 
+    _bc_fill_corners_pipe(out)
     return out
 
 def bc_expand_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds]) -> np.ndarray:
@@ -249,32 +257,48 @@ def bc_apply_vels(f:np.ndarray, bcs:Tuple[LowBounds, LowBounds], copy=True) -> n
 bc_expand_vel = (bc_expand_velx, bc_expand_vely)
 bc_apply_vel = (bc_apply_velx, bc_apply_vely)
 
+def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
+    offset = A(np.zeros_like(b))
+    Aoff = lambda x: (A(x.reshape(b.shape)) - offset).flat
+    Boff = (b - offset).flat
 
+    Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
+    xflat = x0.flat if x0 is not None else None
+    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=1e-3, maxiter=maxiter)
+    if iters == 0:
+        return xN.reshape(b.shape), iters
+    else:
+        return np.zeros_like(b), iters
+
+def is_normal(x:np.ndarray) -> bool: return np.any(np.isinf(x) | np.isnan(x)) == False
 
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
-# interpolate (for Ix: input x field, output interpolated to y field for Iy in reverse)
-def Ix(f:np.ndarray) -> np.ndarray: 
+# interpolate (for Interpolate_velx_to_vely: input x field, output interpolated to y field for Interpolate_vely_to_velx in reverse)
+def Interpolate_velx_to_vely(f:np.ndarray) -> np.ndarray: 
     # base to match shapes: [1:-1, 1:-1] -> [1:-2,1:]
     # interp between [0, -1], [0, 0], [1, -1], [1, 0] thus the below ranges (add to base shape)
     return 1/4*(f[1:-2,:-1] + f[1:-2,1:] + f[2:-1,:-1] + f[2:-1, 1:])
 
-def Iy(f:np.ndarray) -> np.ndarray: 
+def Interpolate_vely_to_velx(f:np.ndarray) -> np.ndarray: 
     # base to match shapes: [1:-1, 1:-1] -> [1:,1:-2]
     # interp between [-1, 0], [0, 0], [-1, 1], [0, 1] thus the below ranges (add to base shape)
-    # should be just transposed Ix shapes!
+    # should be just transposed Interpolate_velx_to_vely shapes!
     return 1/4*(f[:-1,1:-2] + f[1:,1:-2] + f[:-1,2:-1] + f[1:,2:-1])
 
 # Interpolate velocity field to cell 
-# def ICx(f:np.ndarray) -> np.ndarray: return 1/2*(f[1:,:] + f[:-1,:])
-# def ICy(f:np.ndarray) -> np.ndarray: return 1/2*(f[:,1:] + f[:,:-1])
-
-def ICx(f:np.ndarray) -> np.ndarray: return f[:-1,:]
-def ICy(f:np.ndarray) -> np.ndarray: return f[:,:-1]
+def Interpolate_vels_to_cellx(f:np.ndarray) -> np.ndarray: return 1/2*(f[1:,:] + f[:-1,:])
+def Interpolate_vels_to_celly(f:np.ndarray) -> np.ndarray: return 1/2*(f[:,1:] + f[:,:-1])
+# def Interpolate_vels_to_cellx(f:np.ndarray) -> np.ndarray: return f[:-1,:]
+# def Interpolate_vels_to_celly(f:np.ndarray) -> np.ndarray: return f[:,:-1]
 
 # first derivative
-def Dx(f:np.ndarray) -> np.ndarray: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
-def Dy(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
+def Centralx(f:np.ndarray) -> np.ndarray: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
+def Centraly(f:np.ndarray) -> np.ndarray: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
+
+# second derivative
+def Central2x(f:np.ndarray) -> np.ndarray: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
+def Central2y(f:np.ndarray) -> np.ndarray: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
 
 # first derivative upwind
 def Upwindx(f:np.ndarray, dir_f = None) -> np.ndarray: 
@@ -291,49 +315,21 @@ def Upwindy(f:np.ndarray, dir_f = None) -> np.ndarray:
     mask = (dir_f >= 0)
     return np.where(mask, dxn, dxp)
 
-def Pecletx(f:np.ndarray) -> np.ndarray: return rho*f*dx/nu 
-def Peclety(f:np.ndarray) -> np.ndarray: return rho*f*dy/nu 
-Peclet = (Pecletx, Peclety)
-
-def Blend12(f:np.ndarray, d, dir_f = None, factor=0.97) -> np.ndarray: 
-    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
-    upw = Upwind[d](f, dir_f)
-    cen = D[d](f)
-    out = upw + factor*(cen - upw)
-    return out
-    
-def Blendx(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 0, dir_f)
-def Blendy(f:np.ndarray, dir_f = None) -> np.ndarray: return Blend12(f, 1, dir_f)
-    
-bias = 0
-blend = 1
-def FakeFluxLimit12(u:np.ndarray, un:np.ndarray, d) -> np.ndarray:
-    with np.errstate(divide='ignore', invalid='ignore'):
-        if d == 0: r = (un[:-2,1:-1] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[2:,1:-1])
-        if d == 1: r = (un[1:-1,:-2] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[1:-1,2:])
-
-    r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
-    psi = (r + np.abs(r)) / (1 + np.abs(r))
-    psi = np.minimum(psi, 1.0)
-    factor = psi + bias*(blend - psi) 
-    return Blend12(u, d, un[1:-1,1:-1], factor=factor)
-    
-def FakeFluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray: return FakeFluxLimit12(u, un, 0)
-def FakeFluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray: return FakeFluxLimit12(u, un, 1)
-
-def FluxLimitx(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
+def FluxLimitx(u:np.ndarray, un:np.ndarray) -> np.ndarray:
     # N-2 size
     with np.errstate(divide='ignore', invalid='ignore'):
         r = (un[:-2,:] - un[1:-1,:])/(un[1:-1,:] - un[2:,:])
     r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
     psi = (r + np.abs(r)) / (1 + np.abs(r))
-    ai = 0.5*(a[1:,:] + a[:-1,:])
 
     # N-3 size
     uin = u[:-3, :]
     ui = u[1:-2, :]
     uip = u[2:-1, :]
     uipp = u[3:, :]
+
+    # N-1
+    # ai = 0.5*(a[1:,:] + a[:-1,:])
 
     # N-3
     u_L = ui  + 0.5*psi[:-1,:]*(ui - uin)
@@ -348,9 +344,9 @@ def FluxLimitx(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
     # Fill in the rest with simple upwind
     out = Upwindx(u, un[1:-1, 1:-1])
     out[1:-1,:] = Ddx[:,1:-1]
-    return out*a[1:-1, 1:-1] 
+    return out 
 
-def FluxLimity(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
+def FluxLimity(u:np.ndarray, un:np.ndarray) -> np.ndarray:
     # N-2 size
     with np.errstate(divide='ignore', invalid='ignore'):
         r = (un[:,:-2] - un[:,1:-1])/(un[:,1:-1] - un[:,2:])
@@ -363,8 +359,8 @@ def FluxLimity(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
     uip = u[:,2:-1]
     uipp = u[:,3:]
 
-    # N-1 size
-    ai = 0.5*(a[:,1:] + a[:,:-1])
+    # N-1
+    # ai = 0.5*(a[:,1:] + a[:,:-1])
     
     # N-3
     u_L = ui  + 0.5*psi[:,:-1]*(ui - uin)
@@ -377,223 +373,148 @@ def FluxLimity(u:np.ndarray, a:np.ndarray, un:np.ndarray) -> np.ndarray:
 
     #N-2
     # Fill in the rest with simple upwind
-    out = Upwindy(u, un[1:-1, 1:-1])*a[1:-1, 1:-1] 
+    out = Upwindy(u, un[1:-1, 1:-1])
     out[:,1:-1] = Ddy[1:-1,:]
-    return out*a[1:-1, 1:-1] 
+    return out
 
-def is_normal(x):
-    return np.any(np.isinf(x) | np.isnan(x)) == False
-
-# second derivative
-def DDx(f:np.ndarray) -> np.ndarray: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
-def DDy(f:np.ndarray) -> np.ndarray: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
-
-I  = (Ix,  Iy)
-IC = (ICx, ICy)
-D  = (Dx,  Dy)
-DD = (DDx, DDy)
+Interpolate_vels_swap  = (Interpolate_velx_to_vely,  Interpolate_vely_to_velx)
+Interpolate_vels_to_cell = (Interpolate_vels_to_cellx, Interpolate_vels_to_celly)
+Central = (Centralx,  Centraly)
+Central2 = (Central2x, Central2y)
 Upwind = (Upwindx, Upwindy)
-Blend = (Blendx, Blendy)
 FluxLimit = (FluxLimitx, FluxLimity)
-FakeFluxLimit = (FakeFluxLimitx, FakeFluxLimity)
 
-def Grad(exp:np.ndarray)-> np.ndarray: return [Dx(exp),  Dy(exp)]
-def Div(exp:List[np.ndarray]) -> np.ndarray: return Dx(exp[0]) + Dy(exp[1])
-def Lap(exp:np.ndarray|List[np.ndarray]) -> np.ndarray: 
-    if isinstance(exp, list):
-        return [Lap(exp[0]), Lap(exp[1])]
-    return DDx(exp) + DDy(exp)
+def Grad(ex:np.ndarray)-> np.ndarray:       return [Centralx(ex),  Centraly(ex)]
+def Div(ex:List[np.ndarray]) -> np.ndarray: return Centralx(ex[0]) + Centraly(ex[1])
+def Lap(ex:np.ndarray) -> np.ndarray:       return Central2x(ex) + Central2y(ex)
 
-def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
-    offset = A(np.zeros_like(b))
-    Aoff = lambda x: (A(x.reshape(b.shape)) - offset).flat
-    Boff = (b - offset).flat
+def Div_vels_to_cell(ex:List[np.ndarray]) -> np.ndarray:
+    div = 0 
+    div += np.diff(ex[0], n=1, axis=0)/dx
+    div += np.diff(ex[1], n=1, axis=1)/dy 
+    return div
+    
+def Grad_cell_to_vels(ex:np.ndarray) -> List[np.ndarray, np.ndarray]:
+    grad = [None, None]
+    grad[0] = np.diff(ex[:,1:-1], n=1, axis=0)/dx
+    grad[1] = np.diff(ex[1:-1,:], n=1, axis=1)/dy 
+    return grad
 
-    Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
-    xflat = x0.flat if x0 is not None else None
-    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=1e-3, maxiter=maxiter)
-    if iters == 0:
-        return xN.reshape(b.shape), iters
-    else:
-        return np.zeros_like(b), iters
+@dataclass
+class AdvectParams:
+    variant = "flux" #whether to do proper flux limiting. If true no other setting apply
+    factor = 0.0 #0 to 1: only upwind to only central difference
+    dynamic = 0.0 #0 to 1: no to only influence of (inproper) van-leer
+    minblend = 0.0 
+    maxblend = 1.0
+    # def __init__(self): pass
 
-def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, variant:str, rtol=1e-3, iters=1):
-    assert is_normal(un[0])
-    assert is_normal(un[1])
-    assert is_normal(pn)
+# High level advect rutine routing/blending between the possible options (upwind, central, flux limmiting)
+def Advect12(u:np.ndarray, un:np.ndarray, params:AdvectParams, d) -> np.ndarray:
+    # proper flux limitting
+    if params.variant == "flux":
+        return FluxLimit[d](u, un)
 
+    # Ad hoc flux limitting
+    psi = 0
+    if params.dynamic > 0:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            if d == 0: r = (un[:-2,1:-1] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[2:,1:-1])
+            if d == 1: r = (un[1:-1,:-2] - un[1:-1,1:-1])/(un[1:-1,1:-1] - un[1:-1,2:])
+        
+        r = np.nan_to_num(r, posinf=1e9, neginf=-1e9, nan=0)
+        psi = (r + np.abs(r)) / (1 + np.abs(r))
+        psi = np.minimum(psi, 1.0)
+
+    upw = Upwind[d](u, un[1:-1, 1:-1])
+    cen = Central[d](u)
+    blend = params.factor + params.dynamic*(psi - params.factor) 
+    blend = np.clip(blend, params.minblend, params.maxblend)
+    return upw + blend*(cen - upw)
+    
+def Advectx(u:np.ndarray, un:np.ndarray, params:AdvectParams) -> np.ndarray: return Advect12(u, un, params, 0)
+def Advecty(u:np.ndarray, un:np.ndarray, params:AdvectParams) -> np.ndarray: return Advect12(u, un, params, 1)
+
+Advect = (Advectx, Advecty)
+
+def step(un:np.ndarray, pn:np.ndarray, BCu:LowBounds, BCp:LowBounds, proj_variant:str, advect_norm:AdvectParams, advect_tang:AdvectParams, rtol=1e-3, proj_iters=1):
+    # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - div(p)/rho + S
+    # Discrete t: 
+    # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - div(p)/rho + S
+    # un - u = - dt*dot(u, div(un)) + dt*nu*lap(un) - dt*div(p)/rho + dt*S
+    # un + dt*dot(u, div(un)) - dt*nu*lap(un) = u - dt*div(p)/rho + dt*S
+    
     # un_kn = A^-1(f_rhs - G*pn_k)
-    # qn_kn = rho/dt*L^-1*D*un_kn
-    # pn_kn = pn_k + qn_kn - mu/rho*D*un_kn
+    # qn_kn = rho/dt*L^-1*Central*un_kn
+    # pn_kn = pn_k + qn_kn - mu/rho*Central*un_kn
+    un = bc_apply_vels(un, BCu)
 
-    usteps = []
-
-    S = [0, 0] #source terms
     unk = un
     pnk = pn #todo guess
-    for k in range(iters):
-
-        pGrad = [0, 0]
-        if variant != "non-increment":
-            pexp = bc_expand_cell(pnk, BCp)
-            pGrad[0] = np.diff(pexp[:,1:-1], n=1, axis=0)/dx
-            pGrad[1] = np.diff(pexp[1:-1,:], n=1, axis=1)/dy 
-            
-        unkexp = bc_expand_vels(unk, BCu)
-        unkinterp = [I[0](unkexp[0]), I[1](unkexp[1])]
-        unkinterpexp = [
-            bc_expand_vel[1](unkinterp[0], BCu[1]),
-            bc_expand_vel[0](unkinterp[1], BCu[0])
+    for k in range(proj_iters):
+        unknorm = bc_expand_vels(unk, BCu)
+        #interpolated one field onto the other and expanded
+        # according to the others boundary conditons.
+        unktang = [ 
+            bc_expand_vely(Interpolate_velx_to_vely(unknorm[0]), BCu[1]),
+            bc_expand_velx(Interpolate_vely_to_velx(unknorm[1]), BCu[0]),
         ]
 
-        predU = bc_apply_vels(un, BCu)
-        # method = "central"
-        # method = "upwind"
-        method = "blend"
-        # method = "fakefluxlimit"
-        # method = "fakefluxlimit-both"
-        # method = "fluxlimit"
-        # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - div(p)/rho + S
-        # Discrete t: 
-        # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - div(p)/rho + S
-        # un - u = - dt*dot(u, div(un)) + dt*nu*lap(un) - dt*div(p)/rho + dt*S
-        # un + dt*dot(u, div(un)) - dt*nu*lap(un) = u - dt*div(p)/rho + dt*S
+        S = [0, 0] #source terms
+        grad_p = [0, 0]
+        if proj_variant != "non-increment":
+            pex = bc_expand_cell(pnk, BCp)
+            grad_p = Grad_cell_to_vels(pex)
+            
+        u_pred = [0, 0]
         for d in range(2):
-            def predA(u:np.ndarray) -> np.ndarray:
-                nonlocal d, unk, BCu
-                nonlocal usteps
-                tan = 1-d
+            t = 1-d
+            def pred_lhs(u:np.ndarray) -> np.ndarray:
+                uex = bc_expand_vel[d](u, BCu[d])
+                advnorm = unknorm[d][1:-1, 1:-1]*Advect[d](uex, unknorm[d], advect_norm)
+                advtang = unktang[t][1:-1, 1:-1]*Advect[t](uex, unktang[t], advect_tang)
+                adv = advnorm + advtang
 
-                usteps += [u]
-                utang = unkinterp[tan]
-                unorm = unk[d]
-                uexp = bc_expand_vel[d](u, BCu[d])
-
-                if method == "central":
-                    advn = unorm*D[d](uexp) #normal dir
-                    advt = utang*D[tan](uexp) #tangential dir
-                elif method == "upwind":
-                    advn = unorm*Upwind[d](uexp, unorm) #normal dir
-                    advt = utang*Upwind[tan](uexp, utang) #tangential dir
-                elif method == "blend":
-                    advn = unorm*Blend[d](uexp, unorm) #normal dir
-                    advt = utang*Blend[tan](uexp, utang) #tangential dir
-                elif method == "fakefluxlimit":
-                    advn = unorm*FakeFluxLimit[d](uexp, unkexp[d]) #normal dir
-                    advt = utang*Blend[tan](uexp, utang) #tangential dir
-                elif method == "fakefluxlimit-both":
-                    advn = unorm*FakeFluxLimit[d](uexp, unkexp[d]) #normal dir
-                    advt = utang*FakeFluxLimit[tan](uexp, unkinterpexp[tan]) #tangential dir
-                elif method == "fluxlimit":
-                    advn = FluxLimit[d](uexp, unkexp[d], unkexp[d]) #normal dir
-                    advt = utang*Blend[tan](uexp, utang) #tangential dir
-                elif method == "fluxlimit-both":
-                    advn = FluxLimit[d](uexp, unkexp[d], unkexp[d]) #normal dir
-                    advt = FluxLimit[tan](uexp, unkinterpexp[tan], unkinterpexp[tan]) #tangential dir
-                adv = advn + advt
-
-                dif = nu*Lap(uexp)
+                dif = nu*Lap(uex)
                 U = u + dt*adv - dt*dif
                 U = bc_apply_vel[d](U, BCu[d], copy=False)
-
-                # assert is_normal(uexp)
-                # assert is_normal(utang)
-                # assert is_normal(unorm)
-                # assert is_normal(advn)
-                # assert is_normal(advt)
-                # assert is_normal(U)
                 return U
 
-            # assert is_normal(un[0])
-            # assert is_normal(un[1])
-            # assert is_normal(pn)
-            unap = bc_apply_vel[d](un[d], BCu[d])
-            predB = unap - dt*pGrad[d]/rho + dt*S[d]
-            predU[d], predIters = matrix_free_solve(predA, predB, x0=unap, rtol=rtol)
-            retry_pred = False
+            pred_rhs = un[d] - dt*grad_p[d]/rho + dt*S[d]
+            u_pred[d], predIters = matrix_free_solve(pred_lhs, pred_rhs, x0=un[d], rtol=rtol)
             if predIters != 0:
-                return (unk, pnk, np.zeros_like(pnk), np.zeros_like(pnk), [np.zeros_like(unk[0]), np.zeros_like(unk[1])])
+                print("Predictor diverged!")
+                return (unk, pnk, np.zeros_like(pnk), np.zeros_like(pnk), unk)
             
-            predU[d] = bc_apply_vel[d](predU[d], BCu[d], copy=False) 
+        u_pred = bc_apply_vels(u_pred, BCu, copy=False) 
+        div_u_pred = Div_vels_to_cell(u_pred)
 
-        predUDiv = 0 
-        predUDiv += np.diff(predU[0], n=1, axis=0)/dx
-        predUDiv += np.diff(predU[1], n=1, axis=1)/dy 
-
-        corrA = lambda p: Lap(bc_expand_cell(p, BCp))
-        corrB = 1/dt*predUDiv
-        corrP, corrIters = matrix_free_solve(corrA, corrB)
+        corr_lhs = lambda p: Lap(bc_expand_cell(p, BCp))
+        corr_rhs = 1/dt*div_u_pred
+        p_corr, corrIters = matrix_free_solve(corr_lhs, corr_rhs)
         if corrIters != 0:
             print("Corrector diverged!")
-            return (unk, pnk, predUDiv, corrP, predU)
+            return (unk, pnk, div_u_pred, p_corr, u_pred)
         
-        corrPexp = bc_expand_cell(corrP, BCp)
-
-        corrPGrad = [None, None]
-        corrPGrad[0] = np.diff(corrPexp[:,1:-1], n=1, axis=0)/dx
-        corrPGrad[1] = np.diff(corrPexp[1:-1,:], n=1, axis=1)/dy 
-        
-        # corrPDiv = Lap(corrPexp)*dt
-        # deltaPred = predU[0] - unk[0]
-        # deltaCorr = -dt*corrPGrad[0]
-        # deltaPredNorm = np.sum(np.abs(deltaPred))
-        # deltaCorrNorm = np.sum(np.abs(deltaCorr))
+        p_correx = bc_expand_cell(p_corr, BCp)
+        grad_p_corr = Grad_cell_to_vels(p_correx)
 
         u_next = [None, None]
-        u_next[0] = predU[0] - dt*corrPGrad[0]
-        u_next[1] = predU[1] - dt*corrPGrad[1]
+        u_next[0] = u_pred[0] - dt*grad_p_corr[0]
+        u_next[1] = u_pred[1] - dt*grad_p_corr[1]
         u_next = bc_apply_vels(u_next, BCu, copy=False)
 
-        if   variant == "non-increment":    p_next = corrP
-        elif variant == "increment":        p_next = pnk + corrP
-        elif variant == "increment-rot":    p_next = pnk + corrP - nu*predUDiv
+        if   proj_variant == "non-increment":    p_next = p_corr
+        elif proj_variant == "increment":        p_next = pnk + p_corr
+        elif proj_variant == "increment-rot":    p_next = pnk + p_corr - nu*div_u_pred
 
-        # u_next = predU
         unk = u_next
         pnk = p_next
 
-    # todo filter
     assert un[0].shape == unk[0].shape
     assert un[1].shape == unk[1].shape
     assert pnk.shape == pnk.shape
-    return (unk, pnk, predUDiv, corrP, predU)
-
-def test_flux_limit(): 
-    shape = (40, 20)
-    u = np.random.uniform(size=shape)*dx
-
-    # Flat velocity field => pure upwind everywhere
-    uflat = np.full(shape, 1)
-    upwind = Upwindx(u, uflat[1:-1, 1:-1])
-    fluxlim = FluxLimitx(u, uflat)
-    diff = np.max(np.abs(upwind - fluxlim))
-    assert diff <= 1e-4
-
-    # linear velocity field => pure central everywhere (except near boundaries)
-    ulin = np.linspace(1, 2, shape[0])[:, None] * np.ones((1, shape[1]))
-    central = Dx(u)
-    upwind = Upwindx(u, ulin[1:-1, 1:-1])
-    fluxlim = FluxLimitx(u, ulin)
-    expected = upwind
-    expected[1:-1, :] = central[1:-1, :] 
-    difff = np.abs(expected - fluxlim)
-    diff = np.max(np.abs(expected - fluxlim))
-    assert diff <= 1e-4
-
-    # a 50% ramp 50% flat => upwind and central in appropriate region
-    umixed = np.concat((uflat, ulin), axis=0) 
-    uu = np.concat((u, u), axis=0) 
-    fluxlim = FluxLimitx(uu, umixed)
-    fluxlim1 = fluxlim[1:shape[0]-1, :]
-    fluxlim2 = fluxlim[shape[0]+1:-1, :]
-
-    upwind = Upwindx(u, uflat[1:-1, 1:-1])
-    diff = np.max(np.abs(upwind - fluxlim1))
-    assert diff <= 1e-4
-
-    central = Dx(u)
-    diff = np.max(np.abs(upwind[1:-1, 1:-1] - fluxlim2[1:-1, 1:-1]))
-    assert diff <= 1e-4
+    return (unk, pnk, div_u_pred, p_corr, u_pred)
 
 def main():
     # PARAM SETTING
@@ -605,28 +526,43 @@ def main():
     Lx = Ly*nx/ny 
     dx = Lx/nx
     dy = Ly/ny
-    dt = 2e-3
+    dt = 4e-3
     t0 = 0
-    t1 = 6
+    t1 = 100
     rtol = 1e-3
-    nolinear_iters = 1 
+    proj_iters = 1 
     show_interval = 0
     plot_every = 50
-
-    # test_flux_limit()
 
     # domain = "channel"
     # domain = "cavity"
     domain = "channel_cavity"
     # domain = "real_cavity"
 
-    variant = "non-increment"
-    # variant = "increment"
-    # variant = "increment-rot"
+    proj_variant = "non-increment"
+    # proj_variant = "increment"
+    # proj_variant = "increment-rot"
+
+    advect_norm = AdvectParams() 
+    # advect_norm.variant = "flux"
+    advect_norm.variant = "blend"
+    advect_norm.factor = 0.97
+    advect_norm.dynamic = 0.0
+    advect_norm.minblend = 0.0 
+    advect_norm.maxblend = 1.0
+    
+    advect_tang = AdvectParams() 
+    # advect_tang.variant = "flux"
+    advect_tang.variant = "blend"
+    advect_tang.factor = 0.97
+    advect_tang.dynamic = 0.0
+    advect_tang.minblend = 0.0 
+    advect_tang.maxblend = 1.0
 
     example_fields = False
     # example_fields = True
 
+    # display_field = ""
     # display_field = "p"
     # display_field = "u"
     # display_field = "v"
@@ -640,6 +576,13 @@ def main():
     # display_field = "psiu"
     # display_field = "psiv"
     # display_field = "psimag"
+
+    display_cell_centers = False
+    display_grid = False
+    display_BCs = True
+    display_velocity_arrows = True
+    display_face_velocity_arrows = False
+    display_streamlines = False 
 
     dd = min(dx, dy)
     ARROW_SCALE = 1/dd
@@ -758,7 +701,11 @@ def main():
             fields.p = np.sin(np.pi * Xc/(nx * dx)) * np.cos(np.pi * Yc/(ny * dy))
         else:
             # pass
-            step_out = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, variant=variant, iters=nolinear_iters)
+            step_out = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, 
+                proj_variant=proj_variant, 
+                proj_iters=proj_iters, 
+                advect_norm=advect_norm, 
+                advect_tang=advect_tang)
             fields.u = step_out[0][0]
             fields.v = step_out[0][1]
             fields.p = step_out[1]
@@ -778,26 +725,24 @@ def main():
             ax.set_xlim(-dx, (nx + 1) * dx)
             ax.set_ylim(-dy, (ny + 1) * dy)
             ax.set_aspect('equal')
-            ax.set_title(f"variant = {variant} iter = {iter} t = {float(t):.6} cfl = {get_cfl(fields.u)}")
+            ax.set_title(f"iter = {iter} t = {float(t):.6} cfl = {get_cfl(fields.u)}")
 
             # Field drawing
-            velx = ICx(uex)
-            vely = ICy(vex)
-
             display_field_tuple = None
             if   display_field == "p":          display_field_tuple = (pex, "pressure")
-            elif display_field == "u":          display_field_tuple = (velx, "velocity u")
-            elif display_field == "v":          display_field_tuple = (vely, "velocity v")
-
-            elif display_field == "velmag":
-                display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
+            elif display_field in ["u", "v", "velmag"]:
+                velx = Interpolate_vels_to_cellx(uex)
+                vely = Interpolate_vels_to_celly(vex)
+                if display_field == "u":      display_field_tuple = (velx, "velocity u")
+                if display_field == "v":      display_field_tuple = (vely, "velocity v")
+                if display_field == "velmag": display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
             elif display_field == "predu":
-                display_field_tuple = (ICx(bc_expand_velx(step_out[4][0], BCu)), "predictor u")
+                display_field_tuple = (Interpolate_vels_to_cellx(bc_expand_velx(step_out[4][0], BCu)), "predictor u")
             elif display_field == "predv":
-                display_field_tuple = (ICy(bc_expand_vely(step_out[4][1], BCv)), "predictor v")
+                display_field_tuple = (Interpolate_vels_to_celly(bc_expand_vely(step_out[4][1], BCv)), "predictor v")
             elif display_field == "predmag":
                 epred = bc_expand_vels(step_out[4], (BCu, BCv))
-                iepred = [ICx(epred[0]), ICy(epred[1])]
+                iepred = [Interpolate_vels_to_cellx(epred[0]), Interpolate_vels_to_celly(epred[1])]
                 iepredmag = np.hypot(iepred[0], iepred[1])
                 display_field_tuple = (iepredmag, "predictor magnitude")
             elif display_field == "divpred":
@@ -817,7 +762,7 @@ def main():
                 psiv = np.zeros_like(vex)
                 psiv[1:-1, 1:-1] = np.minimum((rv + np.abs(rv)) / (1 + np.abs(rv)), 1)
                 
-                ipsi = [ICx(psiu), ICy(psiv)]
+                ipsi = [Interpolate_vels_to_cellx(psiu), Interpolate_vels_to_celly(psiv)]
                 if display_field == "psiu": display_field_tuple = (psiu, "psiu")
                 if display_field == "psiv": display_field_tuple = (psiv, "psiv")
                 if display_field == "psimag": display_field_tuple = (np.hypot(ipsi[0], ipsi[1]), "psimag")
@@ -827,24 +772,30 @@ def main():
                 cbar = fig.colorbar(im, ax=ax)
                 cbar.set_label(display_field_tuple[1])
 
-            # velocity arrows
-            YuexStaggered = Yuex.copy()
-            YuexStaggered[1::2,:] -= 0.05*dy
-            YuexStaggered[0::2,:] += 0.05*dy
-
-            XvexStaggered = Xvex.copy()
-            XvexStaggered[:,1::2] -= 0.05*dx
-            XvexStaggered[:,0::2] += 0.05*dx
-            ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
-            ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
-            
             # markers for cell centers and faces
-            # ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
-            ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
-            ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
+            if display_cell_centers:
+                ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
+            if display_grid:
+                ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
+                ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
+
+            # velocity arrows
+            if display_face_velocity_arrows:
+                YuexStaggered = Yuex.copy()
+                YuexStaggered[1::2,:] -= 0.05*dy
+                YuexStaggered[0::2,:] += 0.05*dy
+
+                XvexStaggered = Xvex.copy()
+                XvexStaggered[:,1::2] -= 0.05*dx
+                XvexStaggered[:,0::2] += 0.05*dx
+                ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+                ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
 
             # boundaries
             for b in boundaries.values():
+                if display_BCs == False:
+                    continue
+
                 # TODO: get rid of this!
                 @dataclass
                 class BoundRenderInfo: 

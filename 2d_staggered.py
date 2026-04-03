@@ -532,7 +532,7 @@ def main():
     rtol = 1e-3
     proj_iters = 1 
     show_interval = 0
-    plot_every = 50
+    plot_every = 25
 
     # domain = "channel"
     # domain = "cavity"
@@ -544,16 +544,16 @@ def main():
     # proj_variant = "increment-rot"
 
     advect_norm = AdvectParams() 
-    # advect_norm.variant = "flux"
-    advect_norm.variant = "blend"
+    advect_norm.variant = "flux"
+    # advect_norm.variant = "blend"
     advect_norm.factor = 0.97
     advect_norm.dynamic = 0.0
     advect_norm.minblend = 0.0 
     advect_norm.maxblend = 1.0
     
     advect_tang = AdvectParams() 
-    # advect_tang.variant = "flux"
-    advect_tang.variant = "blend"
+    advect_tang.variant = "flux"
+    # advect_tang.variant = "blend"
     advect_tang.factor = 0.97
     advect_tang.dynamic = 0.0
     advect_tang.minblend = 0.0 
@@ -577,12 +577,16 @@ def main():
     # display_field = "psiv"
     # display_field = "psimag"
 
+    line_color = "white"
+    # line_color = "black"
     display_cell_centers = False
     display_grid = False
     display_BCs = True
     display_velocity_arrows = False
     display_face_velocity_arrows = False
+    display_face_velocity_arrows_offsets = False
     display_streamlines = True 
+    display_streamlines_thickness = False 
 
     dd = min(dx, dy)
     ARROW_SCALE = 1/dd
@@ -599,27 +603,6 @@ def main():
         u = np.zeros((nx+1, ny)),
         v = np.zeros((nx, ny+1))
     )
-
-    #grid params
-    x_centers = (np.arange(nx) + 0.5) * dx
-    y_centers = (np.arange(ny) + 0.5) * dy
-    Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
-
-    xfu = np.arange(nx + 1) * dx
-    yfu = (np.arange(ny) + 0.5) * dy
-    Xu, Yu = np.meshgrid(xfu, yfu, indexing='ij')
-
-    xfv = (np.arange(nx) + 0.5) * dx
-    yfv = np.arange(ny + 1) * dy
-    Xv, Yv = np.meshgrid(xfv, yfv, indexing='ij')
-
-    xfuex = (np.arange(nx+3) - 1) * dx
-    yfuex = (np.arange(ny+2) - 1 + 0.5) * dy
-    Xuex, Yuex = np.meshgrid(xfuex, yfuex, indexing='ij')
-
-    xfvex = (np.arange(nx+2) - 1 + 0.5) * dx
-    yfvex = (np.arange(ny+3) - 1) * dy
-    Xvex, Yvex = np.meshgrid(xfvex, yfvex, indexing='ij')
 
     # Main loop
     fig = None
@@ -694,9 +677,21 @@ def main():
         step_out = [None, None, None, None]
         # SIMULATE ============================
         if example_fields:
-            fields.u = 0.6*np.sin(np.pi * Yu/(ny * dy)) + 0.2*(0.5 - Xu/(nx * dx))
-            fields.v = 0.6*np.cos(np.pi * Xv/(nx * dx)) + 0.2*(0.5 - Yv/(ny * dy))
-            fields.p = np.sin(np.pi * Xc/(nx * dx)) * np.cos(np.pi * Yc/(ny * dy))
+            x_centers = (np.arange(nx) + 0.5) * dx
+            y_centers = (np.arange(ny) + 0.5) * dy
+            Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
+
+            xfu = np.arange(nx + 1) * dx
+            yfu = (np.arange(ny) + 0.5) * dy
+            Xu, Yu = np.meshgrid(xfu, yfu, indexing='ij')
+
+            xfv = (np.arange(nx) + 0.5) * dx
+            yfv = np.arange(ny + 1) * dy
+            Xv, Yv = np.meshgrid(xfv, yfv, indexing='ij')
+
+            fields.u = 0.6*np.sin(np.pi * Yu/Ly) + 0.2*(0.5 - Xu/Lx)
+            fields.v = 0.6*np.cos(np.pi * Xv/Lx) + 0.2*(0.5 - Yv/Ly)
+            fields.p = np.sin(np.pi * Xc/Lx) * np.cos(np.pi * Yc/Ly)
         else:
             # pass
             step_out = step([fields.u, fields.v], fields.p, [BCu, BCv], BCp, 
@@ -727,12 +722,14 @@ def main():
 
             velx = Interpolate_vels_to_cellx(uex)
             vely = Interpolate_vels_to_celly(vex)
+            velmag = np.hypot(velx, vely)
+
             # Field drawing
             display_field_tuple = None
-            if   display_field == "p":          display_field_tuple = (pex, "pressure")
+            if   display_field == "p":      display_field_tuple = (pex, "pressure")
             elif display_field == "u":      display_field_tuple = (velx, "velocity u")
             elif display_field == "v":      display_field_tuple = (vely, "velocity v")
-            elif display_field == "velmag": display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
+            elif display_field == "velmag": display_field_tuple = (velmag, "velocity magnitude")
             elif display_field == "predu":
                 display_field_tuple = (Interpolate_vels_to_cellx(bc_expand_velx(step_out[4][0], BCu)), "predictor u")
             elif display_field == "predv":
@@ -769,96 +766,106 @@ def main():
                 cbar = fig.colorbar(im, ax=ax)
                 cbar.set_label(display_field_tuple[1])
 
-            # markers for cell centers and faces
+            x_centers = (np.arange(nx) + 0.5) * dx
+            y_centers = (np.arange(ny) + 0.5) * dy
+            Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
+
+            xfuex = (np.arange(nx+3) - 1) * dx
+            yfuex = (np.arange(ny+2) - 1 + 0.5) * dy
+            Xuex, Yuex = np.meshgrid(xfuex, yfuex, indexing='ij')
+
+            xfvex = (np.arange(nx+2) - 1 + 0.5) * dx
+            yfvex = (np.arange(ny+3) - 1) * dy
+            Xvex, Yvex = np.meshgrid(xfvex, yfvex, indexing='ij')
+
+            # grid
             if display_cell_centers:
-                ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color='red', s=30)
+                ax.scatter(Xc.flatten(), Yc.flatten(), marker='o', color=line_color, s=30)
             if display_grid:
-                ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
-                ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
-            if display_streamlines:
-                ax.streamplot(Xc[:,0], Yc[0,:], velx[1:-1,1:-1].T, vely[1:-1,1:-1].T, color="black", density=1, linewidth=0.8, arrowsize=0.7)
-            if display_velocity_arrows:
-                ax.quiver(Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1], angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+                ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color=line_color, linewidth=0.4)
+                ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color=line_color, linewidth=0.4)
 
             # velocity arrows
+            if display_velocity_arrows:
+                ax.quiver(Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1], scale=1/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=1)
+
+            # velocity grid
             if display_face_velocity_arrows:
                 YuexStaggered = Yuex.copy()
-                YuexStaggered[1::2,:] -= 0.05*dy
-                YuexStaggered[0::2,:] += 0.05*dy
+                YuexStaggered[1::2,:] -= 0.05*dy if display_face_velocity_arrows_offsets else 0
+                YuexStaggered[0::2,:] += 0.05*dy if display_face_velocity_arrows_offsets else 0
 
                 XvexStaggered = Xvex.copy()
-                XvexStaggered[:,1::2] -= 0.05*dx
-                XvexStaggered[:,0::2] += 0.05*dx
-                ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
-                ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
+                XvexStaggered[:,1::2] -= 0.05*dx if display_face_velocity_arrows_offsets else 0
+                XvexStaggered[:,0::2] += 0.05*dx if display_face_velocity_arrows_offsets else 0
+                ax.quiver(Xuex, YuexStaggered, uex, np.zeros_like(uex), scale=1/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=0.7, headwidth=2, headlength=2)
+                ax.quiver(XvexStaggered, Yvex, np.zeros_like(vex), vex, scale=1/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=0.7, headwidth=2, headlength=2)
+
+            # streamlines
+            if display_streamlines:
+                lw = 0.8
+                density = 1
+                if display_streamlines_thickness:
+                    min_w = 0.2
+                    max_w = 3
+                    vel = velmag[1:-1,1:-1]
+                    lw = (max_w - min_w)*(vel / vel.max()) + min_w
+                    lw = lw.T
+                    density = 2
+                ax.streamplot(Xc[:,0], Yc[0,:], velx[1:-1,1:-1].T, vely[1:-1,1:-1].T, color=line_color, density=density, linewidth=lw, arrowsize=0.7)
 
             # boundaries
             for b in boundaries.values():
                 if display_BCs == False:
                     continue
 
-                # TODO: get rid of this!
-                @dataclass
-                class BoundRenderInfo: 
-                    dim:str
-                    n:list #normal, tangential direction
-                    t:list 
-                    ddn:float  #dx or dy in normal or tan dir
-                    ddt:float 
-                    xs:np.ndarray #bottom left point of boundary face x,y
-                    ys:np.ndarray
-                    
-                if b.side == "W": info = BoundRenderInfo("x", [-1, 0], [0, 1], dx, dy, b.xs, b.ys)
-                if b.side == "E": info = BoundRenderInfo("x", [1, 0], [0, -1], dx, dy, b.xs+1, b.ys)
-                if b.side == "S": info = BoundRenderInfo("y", [0, -1], [1, 0], dy, dx, b.xs, b.ys)
-                if b.side == "N": info = BoundRenderInfo("y", [0, 1], [-1, 0], dy, dx, b.xs, b.ys+1)
+                if b.side == "W": n, t, ddn, ddt, xs, ys = [-1, 0], [0, 1], dx, dy, b.xs, b.ys
+                if b.side == "E": n, t, ddn, ddt, xs, ys = [1, 0], [0, -1], dx, dy, b.xs+1, b.ys
+                if b.side == "S": n, t, ddn, ddt, xs, ys = [0, -1], [1, 0], dy, dx, b.xs, b.ys
+                if b.side == "N": n, t, ddn, ddt, xs, ys = [0, 1], [-1, 0], dy, dx, b.xs, b.ys+1
 
-                n, t = np.array(info.n), np.array(info.t)
-                xs, ys = info.xs, info.ys
-                ddn, ddt = info.ddn, info.ddt
-                vx, vy = b.valu, b.valv
-                v = np.vstack((vx, vy)).T 
-
+                n, t = np.array(n), np.array(t)
                 coords = np.array([xs, ys]).T
                 dx_dy = np.array([dx, dy])
+                
                 # face edges, face center
                 e1 = coords * dx_dy
-                e2 = (coords + np.abs(info.t)) * dx_dy
+                e2 = (coords + np.abs(t)) * dx_dy
                 ec = (e1 + e2) / 2
 
                 if b.type == "noslip":
                     xs = np.array([e1[:, 0], e2[:, 0]]).T
                     ys = np.array([e1[:, 1], e2[:, 1]]).T
-                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4)
+                    ax.plot(xs, ys, color=line_color, solid_capstyle='butt', linewidth=4)
 
                 if b.type == "slip":
                     xs = np.array([e1[:, 0], e2[:, 0]]).T
                     ys = np.array([e1[:, 1], e2[:, 1]]).T
-                    ax.plot(xs, ys, color="black", solid_capstyle='butt', linewidth=4, linestyle=":")
+                    ax.plot(xs, ys, color=line_color, solid_capstyle='butt', linewidth=4, linestyle=":")
 
                 if b.type == "inflow":
+                    v = np.vstack((b.valu, b.valv)).T 
                     if np.all(v*n == 0):
                         soffx, soffy = ec[:,0], ec[:,1]
-                        if info.dim == "y": 
+                        if b.side in ["S", "N"]:
                             soffy[0::2] += 0.1*ddn
                             soffy[1::2] += 0.05*ddn
-                        if info.dim == "x": 
+                        if b.side in ["W", "E"]:
                             soffx[0::2] += 0.1*ddn
                             soffx[1::2] += 0.05*ddn
-                        ax.quiver(soffx, soffy, vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
-
-                        xs = np.array([e1[:, 0], e2[:, 0]]).T
-                        ys = np.array([e1[:, 1], e2[:, 1]]).T
-                        ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=':', linewidth=1.5)
+                        ax.quiver(soffx, soffy, b.valu, b.valv, angles='xy', scale_units='xy', units="dots", color=line_color, scale=1/dd, width=2, minlength=0)
                     else:
-                        for off in np.linspace(-0.4, 0.4, 5)*ddt:
+                        offcount = 2
+                        d = 0.5/offcount
+                        for off in np.linspace(-0.5+d, 0.5-d, offcount)*ddt:
                             o = ec-v*dd + off*t
-                            ax.quiver(o[:,0], o[:,1], vx, vy, angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
-
-                if b.type == "outflow":
-                    # offsets = [0, 0.1, 0.2]
-                    # styles = ["solid", "solid", "dotted"]
+                            ax.quiver(o[:,0], o[:,1], b.valu, b.valv, angles='xy', scale_units='xy', units="dots", color=line_color, scale=1/dd, width=2, minlength=0)
                     
+                    xs = np.array([e1[:, 0], e2[:, 0]]).T
+                    ys = np.array([e1[:, 1], e2[:, 1]]).T
+                    ax.plot(xs, ys, color=line_color, solid_capstyle='butt', linestyle=(0, (2, 3)), linewidth=1)
+                    
+                if b.type == "outflow":
                     offsets = [0, 0.2]
                     styles = ["-", (0, (2, 3))]
                     for style, off in zip(styles, offsets):
@@ -867,7 +874,7 @@ def main():
 
                         xs = np.array([o1[:, 0], o2[:, 0]]).T
                         ys = np.array([o1[:, 1], o2[:, 1]]).T
-                        ax.plot(xs, ys, color="black", solid_capstyle='butt', linestyle=style, linewidth=1)
+                        ax.plot(xs, ys, color=line_color, solid_capstyle='butt', linestyle=style, linewidth=1)
             fig.canvas.draw()
             fig.canvas.flush_events()
             time.sleep(show_interval) 

@@ -158,10 +158,10 @@ Boundaries = Dict[str, Boundary]
 # Also sets the values when directly on the boundary
 
 def _bc_fill_corners_pipe(out:np.ndarray):
-    out[0,0] = out[0,1]
-    out[-1,0] = out[-1,1]
-    out[0,-1] = out[0,-2]
-    out[-1,-1] = out[-1,-2]
+    out[0,0] = out[1,0]
+    out[0,-1] = out[1,-1]
+    out[-1,0] = out[-2,0]
+    out[-1,-1] = out[-2,-1]
 
 def bc_expand_velx(f:np.ndarray, bcs:LowBounds) -> np.ndarray:
     out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
@@ -580,9 +580,9 @@ def main():
     display_cell_centers = False
     display_grid = False
     display_BCs = True
-    display_velocity_arrows = True
+    display_velocity_arrows = False
     display_face_velocity_arrows = False
-    display_streamlines = False 
+    display_streamlines = True 
 
     dd = min(dx, dy)
     ARROW_SCALE = 1/dd
@@ -632,8 +632,6 @@ def main():
             break
         
         def parabolic_profile(u:float, n:int) -> np.ndarray:
-            # return np.full(n, u)
-
             centers = (np.arange(n) + 0.5)/n
             profile = u*(1 - (2*centers - 1)**2)
             return profile
@@ -727,15 +725,14 @@ def main():
             ax.set_aspect('equal')
             ax.set_title(f"iter = {iter} t = {float(t):.6} cfl = {get_cfl(fields.u)}")
 
+            velx = Interpolate_vels_to_cellx(uex)
+            vely = Interpolate_vels_to_celly(vex)
             # Field drawing
             display_field_tuple = None
             if   display_field == "p":          display_field_tuple = (pex, "pressure")
-            elif display_field in ["u", "v", "velmag"]:
-                velx = Interpolate_vels_to_cellx(uex)
-                vely = Interpolate_vels_to_celly(vex)
-                if display_field == "u":      display_field_tuple = (velx, "velocity u")
-                if display_field == "v":      display_field_tuple = (vely, "velocity v")
-                if display_field == "velmag": display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
+            elif display_field == "u":      display_field_tuple = (velx, "velocity u")
+            elif display_field == "v":      display_field_tuple = (vely, "velocity v")
+            elif display_field == "velmag": display_field_tuple = (np.hypot(velx, vely), "velocity magnitude")
             elif display_field == "predu":
                 display_field_tuple = (Interpolate_vels_to_cellx(bc_expand_velx(step_out[4][0], BCu)), "predictor u")
             elif display_field == "predv":
@@ -778,6 +775,10 @@ def main():
             if display_grid:
                 ax.plot([xfu, xfu], [np.full(nx+1, 0), np.full(nx+1, Ly)], color='black', linewidth=0.4)
                 ax.plot([np.full(ny+1, Lx), np.full(ny+1, 0)], [yfv, yfv], color='black', linewidth=0.4)
+            if display_streamlines:
+                ax.streamplot(Xc[:,0], Yc[0,:], velx[1:-1,1:-1].T, vely[1:-1,1:-1].T, color="black", density=1, linewidth=0.8, arrowsize=0.7)
+            if display_velocity_arrows:
+                ax.quiver(Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1], angles='xy', scale_units='xy', scale=ARROW_SCALE, width=dd*0.02, headwidth=5)
 
             # velocity arrows
             if display_face_velocity_arrows:

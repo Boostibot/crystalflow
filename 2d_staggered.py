@@ -430,15 +430,20 @@ def Advecty(u:np.ndarray, un:np.ndarray, params:AdvectParams) -> np.ndarray: ret
 
 Advect = (Advectx, Advecty)
 
+xxx_iter = 0
 def step(
     velxn:np.ndarray, velyn:np.ndarray, pn:np.ndarray, 
     BCvelx:LowBounds, BCvely:LowBounds, BCp:LowBounds, 
-    proj_variant:str, advect_norm:AdvectParams, advect_tang:AdvectParams, 
+    advect_norm:AdvectParams, advect_tang:AdvectParams, 
+    proj_variant="increment-rot",
+    proj_nonlinear=False,
     proj_iters=1, rtol=1e-3) -> dict:
 
-    un = [velxn, velyn]
     BCu = [BCvelx, BCvely]
+    un = bc_apply_vels([velxn, velyn], BCu)
 
+    global xxx_iter
+    xxx_iter += 1
     # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - div(p)/rho + S
     # Discrete t: 
     # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - div(p)/rho + S
@@ -448,26 +453,30 @@ def step(
     # un_kn = A^-1(f_rhs - G*pn_k)
     # qn_kn = rho/dt*L^-1*Central*un_kn
     # pn_kn = pn_k + qn_kn - mu/rho*Central*un_kn
-    un = bc_apply_vels(un, BCu)
 
     unk = un
     pnk = pn #todo guess
+
+    # It doesnt make sense to do iterations on non-incremental scheme
+    if proj_variant == "non-increment":
+        proj_iters = 1
+
     for k in range(proj_iters):
-        unknorm = bc_expand_vels(unk, BCu)
+        unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
         #interpolated one field onto the other and expanded
         # according to the others boundary conditons.
         unktang = [ 
             bc_expand_vely(Interpolate_velx_to_vely(unknorm[0]), BCu[1]),
             bc_expand_velx(Interpolate_vely_to_velx(unknorm[1]), BCu[0]),
         ]
-
+        
         S = [0, 0] #source terms
         grad_p = [0, 0]
         if proj_variant != "non-increment":
             pex = bc_expand_cell(pnk, BCp)
             grad_p = Grad_cell_to_vels(pex)
             
-        u_pred = [unk[0], unk[1]]
+        u_pred = [un[0], un[1]]
         for d in range(2):
             t = 1-d
             def pred_lhs(u:np.ndarray) -> np.ndarray:
@@ -481,41 +490,43 @@ def step(
                 U = bc_apply_vel[d](U, BCu[d], copy=False)
                 return U
 
-            pred_rhs = un[d] - dt*grad_p[d]/rho + dt*S[d]
-            u_pred[d], predIters = matrix_free_solve(pred_lhs, pred_rhs, x0=un[d], rtol=rtol)
+            pred_rhs = un[d] - dt/rho*grad_p[d] + dt*S[d]
+            u_pred[d], predIters = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], rtol=rtol)
             if predIters != 0:
-                print("Predictor diverged!")
-                u_pred[d] = unk[d]
-                return {"u": u_pred[0], "v": u_pred[1], "p":pnk, "u_pred": u_pred}
+                print(f"Predictor diverged! {xxx_iter}")
+                return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
             
         u_pred = bc_apply_vels(u_pred, BCu, copy=False) 
         div_u_pred = Div_vels_to_cell(u_pred)
 
+        if   proj_variant == "non-increment":    corr_guess = pnk
+        elif proj_variant == "increment":        corr_guess = None
+        elif proj_variant == "increment-rot":    corr_guess = nu*div_u_pred
         corr_lhs = lambda p: Lap(bc_expand_cell(p, BCp))
-        corr_rhs = 1/dt*div_u_pred
-        p_corr, corrIters = matrix_free_solve(corr_lhs, corr_rhs)
+        corr_rhs = rho/dt*div_u_pred
+        p_corr, corrIters = matrix_free_solve(corr_lhs, corr_rhs, x0=corr_guess)
         if corrIters != 0:
-            print("Corrector diverged!")
-            return {"u": u_pred[0], "v": u_pred[1], "p":pnk, "u_pred": u_pred}
+            print(f"Corrector diverged! {xxx_iter}")
+            return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
         
         p_correx = bc_expand_cell(p_corr, BCp)
         grad_p_corr = Grad_cell_to_vels(p_correx)
 
         u_next = [None, None]
-        u_next[0] = u_pred[0] - dt*grad_p_corr[0]
-        u_next[1] = u_pred[1] - dt*grad_p_corr[1]
+        u_next[0] = u_pred[0] - dt/rho*grad_p_corr[0]
+        u_next[1] = u_pred[1] - dt/rho*grad_p_corr[1]
         u_next = bc_apply_vels(u_next, BCu, copy=False)
 
         if   proj_variant == "non-increment":    p_next = p_corr
-        elif proj_variant == "increment":        p_next = pnk + p_corr
-        elif proj_variant == "increment-rot":    p_next = pnk + p_corr - nu*div_u_pred
+        elif proj_variant == "increment":        p_next = pn + p_corr
+        elif proj_variant == "increment-rot":    p_next = pn + p_corr - nu*div_u_pred
 
         unk = u_next
         pnk = p_next
 
     assert un[0].shape == unk[0].shape
     assert un[1].shape == unk[1].shape
-    assert pnk.shape == pnk.shape
+    assert pn.shape == pnk.shape
     return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred, "p_corr":p_corr}
 
 def main():
@@ -532,17 +543,20 @@ def main():
     t0 = 0
     t1 = 100
     rtol = 1e-3
-    proj_iters = 1 
+    proj_iters = 1
+
+    # proj_variant = "non-increment"
+    # proj_variant = "increment"
+    proj_variant = "increment-rot"
+    # Whether to use prev iter or best guess to next iter as 
+    # the other velocity in advection
+    proj_nonlinear = False  
 
     # domain = "channel"
     # domain = "cavity"
     domain = "channel_cavity"
     # domain = "real_cavity"
     parabolic_profile = True
-
-    proj_variant = "non-increment"
-    # proj_variant = "increment"
-    # proj_variant = "increment-rot"
 
     advect_norm = AdvectParams() 
     advect_norm.variant = "flux"
@@ -611,7 +625,7 @@ def main():
         t = min(iter*dt, t1)
         
         # BOUNDARIES =========================
-        u_in = min(1, 10*t)
+        u_in = min(1, t)
         boundaries = make_domain(domain, u_in, parabolic_profile)
         BCp, BCu, BCv = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
@@ -622,6 +636,7 @@ def main():
             fields = step(fields["u"], fields["v"], fields["p"], BCu, BCv, BCp, 
                 proj_variant=proj_variant, 
                 proj_iters=proj_iters, 
+                proj_nonlinear=proj_nonlinear,
                 advect_norm=advect_norm, 
                 advect_tang=advect_tang)
 
@@ -672,7 +687,7 @@ def make_domain(domain_variant:str, u_in:float, parabolic:bool) -> Boundaries:
 
     def parabolic_profile(u:float, n:int) -> np.ndarray:
         if parabolic == False:
-            return np.full(u, n)
+            return np.full(n, u)
         centers = (np.arange(n) + 0.5)/n
         profile = u*(1 - (2*centers - 1)**2)
         return profile

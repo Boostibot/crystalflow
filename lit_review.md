@@ -90,6 +90,19 @@ Very good overview of the different methods and implementation and benchamrks. D
 https://www.researchgate.net/publication/243771948_A_Second-Order_Accurate_Pressure-Correction_Scheme_for_Viscous_Incompressible_Flow
 I believe the first staggered grid impl. Very importat. Cite and use as validation. Read again!
 
+### Benchmarks for diffuse interface modelling of fluid–solid interactions in a flow
+Compares the different phase field approaches in flow problems. Discusses everything even numerics. Good read, cite this!
+Very well describes the development of immersed boundary -> diffuse domain, choice of h(phase) etc.
+Has nice overview of even the phase field stuff.
+Has nice examples test cases of Poiseuille/Couette/past-cylinder flow I could also use in my tests.
+
+#### To look into
+- When is vortex shedig expected?
+- Pace3d solver
+- far-field BC
+- free BC
+
+
 ## On the design
 I initially wanted to do collocated grid cause it seemed that the single grid would be easier to extend to the phase field/wall intersections just because its simpler. That however posed problems in all of the methods due to checkerboarding even on 1D grids. The only known way to circumwent this is to use Rhye-Chow interpolation. That however needs access to the symbolic digonal matrix coeefficient. This poses an implementation problem: implementing the methods by explicit matrix construction is very difficult due to the irregularity of BCs and upwind (+ in the future with the phase field). It turns out that without it we can use GC-like methods that never need the explicit matrix and only ever need the application of the matrix onto a vector as function. This is very very handy as it means we can do "just a explicit calculation*" and pass it into the matrix solver - with the * that the calculation needs to be linear (duh) and needs to handle the constant offsets in a special way. The boundary conditions create additional source terms that should be moved to the RHS. We can either do that explicitly which once again requires some implicit treatment OR use a trick of simply adding them up to everything else and then at the end correcting them. To correct we simply apply the calculation onto 0 vector and then substract from both sides of the EQ. With this the staggered grid impl is super simple and straight forward.
 

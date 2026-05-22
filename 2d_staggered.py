@@ -35,10 +35,11 @@ c_sound = 343
 nx, ny, nu, rho, Lx, Ly, dx, dy, dt = 0, 0, 0, 0, 0, 0, 0, 0, 0
 rho = 1
 beta = 0.002
-phi_eps = 0.1
-phi_W = 8
-# phi_eps = 0.001
-phi_delta = 1e-6
+# phi_eps = 0.1
+phi_width = 8
+phi_eps = 0.001
+phi_delta = 1e-4
+phi_cutoff = 0.4
 
 def get_cfl(u):
     return np.max(np.abs(u)*dt/dx)
@@ -168,7 +169,12 @@ class Boundary: #High level boundary for the whole simulation
             ubs[utype + b.side] = LowBound.concat(ubs.get(utype + b.side), LowBound(b.side, utype, b.xs, b.ys, b.valu))
             vbs[vtype + b.side] = LowBound.concat(vbs.get(vtype + b.side), LowBound(b.side, vtype, b.xs, b.ys, b.valv))
             fbs[ftype + b.side] = LowBound.concat(fbs.get(ftype + b.side), LowBound(b.side, ftype, b.xs, b.ys, np.zeros_like(b.ys)))
-        return (ubs, vbs, pbs, fbs)
+        return {
+            'u':ubs, 
+            'v':vbs, 
+            'p':pbs, 
+            'f':fbs
+        }
 
 Boundaries = Dict[str, Boundary]
 
@@ -231,8 +237,9 @@ def bc_expand_vely(f:Vely, bcs:LowBounds) -> VelyEx:
     _bc_fill_corners_pipe(out)
     return out
 
-def bc_expand_cell(f:Cell, bcs:LowBounds) -> CellEx:
-    out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
+def bc_expand_cell(f:Cell, bcs:LowBounds, out=None) -> CellEx:
+    if out is None:
+        out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
     out[1:-1, 1:-1] = f
 
     for type_side, bc in bcs.items():
@@ -275,20 +282,23 @@ def bc_apply_vels(f:Vels, bcs:Tuple[LowBounds, LowBounds], copy=True) -> Vels:
 bc_expand_vel = (bc_expand_velx, bc_expand_vely)
 bc_apply_vel = (bc_apply_velx, bc_apply_vely)
 
-def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, expandOffset:bool=True, x0:np.ndarray|None = None, rtol:float = 1e-3, maxiter:int = 200) -> Tuple[np.ndarray, int]:
+def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, x0:np.ndarray|None = None, rtol:float = 1e-5, atol:float=0, maxiter:int = 300) -> Tuple[np.ndarray, int]:
     offset = A(np.zeros_like(b))
     Aoff = lambda x: (A(x.reshape(b.shape)) - offset).flat
     Boff = (b - offset).flat
 
     Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
     xflat = x0.flat if x0 is not None else None
-    xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=1e-3, maxiter=maxiter)
-    if iters == 0:
-        return xN.reshape(b.shape), iters
-    else:
-        return np.zeros_like(b), iters
+    xN, iters = sp.sparse.linalg.bicgstab(Aop, Boff, x0=xflat, rtol=rtol, atol=atol, maxiter=maxiter)
+    # xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=atol, maxiter=maxiter)
 
-def is_normal(x:np.ndarray) -> bool: return np.any(np.isinf(x) | np.isnan(x)) == False
+    # iters<0: breakdown (solution unreliable)
+    if iters < 0:
+        return np.zeros_like(b), iters
+    # iters==0: converged; iters>0: maxiter hit (partial solution still useful);
+    return xN.reshape(b.shape), iters
+
+# def is_normal(x:np.ndarray) -> bool: return np.any(np.isinf(x) | np.isnan(x)) == False
 
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
@@ -311,6 +321,11 @@ def Interp_vels_to_cell_nearestx(f:VelxEx) -> Cell: return f[:-1,:]
 def Interp_vels_to_cell_nearesty(f:VelyEx) -> Cell: return f[:,:-1]
 def Interp_cell_to_velx(c:CellEx) -> Velx: return 0.5*(c[:-1,1:-1] + c[1:,1:-1])
 def Interp_cell_to_vely(c:CellEx) -> Vely: return 0.5*(c[1:-1,:-1] + c[1:-1,1:])
+def Interp_cell_to_velx_e(c:CellEx) -> Velx: return 0.5*(c[:-1,:] + c[1:,:])
+def Interp_cell_to_vely_e(c:CellEx) -> Vely: return 0.5*(c[:,:-1] + c[:,1:])
+
+def Interp_cell_to_vels(c:CellEx) -> List[np.ndarray]: 
+    return [Interp_cell_to_velx(c), Interp_cell_to_vely(c)]
 
 # first derivative
 def Centralx(f:FieldEx) -> Field: return (f[2:, 1:-1] - f[:-2, 1:-1])/(2*dx)
@@ -320,6 +335,43 @@ def Centraly(f:FieldEx) -> Field: return (f[1:-1, 2:] - f[1:-1, :-2])/(2*dy)
 def Central2x(f:FieldEx) -> Field: return np.diff(f[:,1:-1], n=2, axis=0)/dx**2
 def Central2y(f:FieldEx) -> Field: return np.diff(f[1:-1,:], n=2, axis=1)/dy**2
 
+def DivGradfx(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
+    du = np.diff(u[:, 1:-1], axis=0)   # u[1:,1:-1] - u[:-1,1:-1]
+    np.multiply(du, faces, out=du)     # du *= faces
+    return np.diff(du, axis=0) / dx**2
+
+def DivGradfy(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
+    du = np.diff(u[1:-1, :], axis=1)   # u[1:-1,1:] - u[1:-1,:-1]
+    np.multiply(du, faces, out=du)     # du *= faces
+    return np.diff(du, axis=1) / dy**2
+
+# def DivGrad(faces:List[np.ndarray], cells:FieldEx) -> Field: 
+    # return DivGradfx(faces[0], cells) + DivGradfy(faces[1], cells) 
+
+# Optimized version 
+def DivGrad(faces, cells, out=None, scratch_x=None, scratch_y=None):
+    fx, fy = faces
+    dtype = np.result_type(cells, fx, fy, 0.0)
+    if out is None:
+        out = np.empty((cells.shape[0] - 2, cells.shape[1] - 2), dtype=dtype)
+    if scratch_x is None:
+        scratch_x = np.empty_like(fx, dtype=dtype)
+    if scratch_y is None:
+        scratch_y = np.empty_like(fy, dtype=dtype)
+
+    np.subtract(cells[1:, 1:-1], cells[:-1, 1:-1], out=scratch_x)
+    np.multiply(scratch_x, fx, out=scratch_x)
+    np.subtract(scratch_x[1:], scratch_x[:-1], out=out)
+    out *= 1.0 / dx**2
+
+    np.subtract(cells[1:-1, 1:], cells[1:-1, :-1], out=scratch_y)
+    np.multiply(scratch_y, fy, out=scratch_y)
+    np.subtract(scratch_y[:, 1:], scratch_y[:, :-1], out=scratch_x[:-1])
+    scratch_x[:-1] *= 1.0 / dy**2
+    out += scratch_x[:-1]
+
+    return out
+    
 # first derivative upwind
 def Upwindx(f:VelxEx, dir_f:VelxEx = None) -> Velx: 
     dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
@@ -398,6 +450,8 @@ Central2 = (Central2x, Central2y)
 Upwind = (Upwindx, Upwindy)
 FluxLimit = (FluxLimitx, FluxLimity)
 
+
+
 def Grad(ex:FieldEx)-> Field:       return [Centralx(ex),  Centraly(ex)]
 def Div(ex:List[FieldEx]) -> Field: return Centralx(ex[0]) + Centraly(ex[1])
 def Lap(ex:FieldEx) -> Field:       return Central2x(ex) + Central2y(ex)
@@ -450,20 +504,23 @@ def Advecty(u:np.ndarray, un:np.ndarray, params:AdvectParams) -> np.ndarray: ret
 
 Advect = (Advectx, Advecty)
 
-xxx_iter = 0
 def step(
-    velxn:np.ndarray, velyn:np.ndarray, pn:np.ndarray, 
-    BCvelx:LowBounds, BCvely:LowBounds, BCp:LowBounds, 
+    fields:dict, low_bounds:dict,
     advect_norm:AdvectParams, advect_tang:AdvectParams, 
+    step = 0,
     proj_variant="increment-rot",
     proj_nonlinear=False,
-    proj_iters=1, rtol=1e-3) -> dict:
+    proj_iters=1) -> dict:
+    
+    BCu = [low_bounds['u'], low_bounds['v']]
+    BCp = low_bounds['p']
 
-    BCu = [BCvelx, BCvely]
-    un = bc_apply_vels([velxn, velyn], BCu)
+    uxn:Velx = fields['u'] 
+    uyn:Vely = fields['v'] 
+    pn:Cell  = fields['p'] 
+    
+    un = bc_apply_vels([uxn, uyn], BCu)
 
-    global xxx_iter
-    xxx_iter += 1
     # Exact:      du/dt = - dot(u, div(u)) + nu*lap(u) - grad(p)/rho + S
     # Discrete t: 
     # (un - u)/dt = - dot(u, div(un)) + nu*lap(un) - grad(p)/rho + S
@@ -482,27 +539,27 @@ def step(
         proj_iters = 1
 
     for k in range(proj_iters):
-        unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
+        ex_unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
         #interpolated one field onto the other and expanded
         # according to the others boundary conditons.
-        unktang = [ 
-            bc_expand_vely(Interp_velx_to_vely(unknorm[0]), BCu[1]),
-            bc_expand_velx(Interp_vely_to_velx(unknorm[1]), BCu[0]),
+        ex_unktang = [ 
+            bc_expand_vely(Interp_velx_to_vely(ex_unknorm[0]), BCu[1]),
+            bc_expand_velx(Interp_vely_to_velx(ex_unknorm[1]), BCu[0]),
         ]
         
         S = [0, 0] #source terms
-        grad_p = [0, 0]
+        grad_pnk = [0, 0]
         if proj_variant != "non-increment":
-            pex = bc_expand_cell(pnk, BCp)
-            grad_p = Grad_cell_to_vels(pex)
+            ex_p = bc_expand_cell(pnk, BCp)
+            grad_pnk = Grad_cell_to_vels(ex_p)
             
         u_pred = [un[0], un[1]]
         for d in range(2):
             t = 1-d
             def pred_lhs(u:np.ndarray) -> np.ndarray:
                 uex = bc_expand_vel[d](u, BCu[d])
-                advnorm = unknorm[d][1:-1, 1:-1]*Advect[d](uex, unknorm[d], advect_norm)
-                advtang = unktang[t][1:-1, 1:-1]*Advect[t](uex, unktang[t], advect_tang)
+                advnorm = ex_unknorm[d][1:-1, 1:-1]*Advect[d](uex, ex_unknorm[d], advect_norm)
+                advtang = ex_unktang[t][1:-1, 1:-1]*Advect[t](uex, ex_unktang[t], advect_tang)
                 adv = advnorm + advtang
 
                 dif = nu*Lap(uex)
@@ -510,11 +567,14 @@ def step(
                 U = bc_apply_vel[d](U, BCu[d], copy=False)
                 return U
 
-            pred_rhs = un[d] - dt/rho*grad_p[d] + dt*S[d]
-            u_pred[d], predIters = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], rtol=rtol)
-            if predIters != 0:
-                print(f"Predictor diverged! {xxx_iter}")
+            pred_rhs = un[d] - dt/rho*grad_pnk[d] + dt*S[d]
+            pred_maxiter = max(300, 3 * pred_rhs.size)
+            u_pred[d], pred_iters = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], maxiter=pred_maxiter)
+            if pred_iters < 0:
+                print(f"Predictor ({d=}) breakdown at step {step}")
                 return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
+            if pred_iters > 0:
+                print(f"Predictor ({d=}) slow convergence ({pred_iters} iters) at step {step}")
             
         u_pred = bc_apply_vels(u_pred, BCu, copy=False) 
         div_u_pred = Div_vels_to_cell(u_pred)
@@ -524,10 +584,13 @@ def step(
         elif proj_variant == "increment-rot":    corr_guess = nu*div_u_pred
         corr_lhs = lambda p: Lap(bc_expand_cell(p, BCp))
         corr_rhs = rho/dt*div_u_pred
-        p_corr, corrIters = matrix_free_solve(corr_lhs, corr_rhs, x0=corr_guess)
-        if corrIters != 0:
-            print(f"Corrector diverged! {xxx_iter}")
+        corr_maxiter = max(300, 3 * corr_rhs.size)
+        p_corr, corr_iters = matrix_free_solve(corr_lhs, corr_rhs, x0=corr_guess, maxiter=corr_maxiter)
+        if corr_iters < 0:
+            print(f"Corrector breakdown at step {step}")
             return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
+        if corr_iters > 0:
+            print(f"Corrector slow convergence ({corr_iters} iters) at step {step}")
         
         p_correx = bc_expand_cell(p_corr, BCp)
         grad_p_corr = Grad_cell_to_vels(p_correx)
@@ -549,16 +612,27 @@ def step(
     assert pn.shape == pnk.shape
     return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred, "p_corr":p_corr}
 
+
+
+cutoff_u = -np.inf
+cutoff_p = -np.inf
+cutoff_u_post = -np.inf
+cutoff_p_post = -np.inf
+cutoff_u_corr = -np.inf
+
+import time
 def step_phase(
-    uxn:Velx, uyn:Vely, pn:Cell, phi:Cell,
-    BCux:LowBounds, BCuy:LowBounds, BCp:LowBounds, BCphi:LowBounds,
-    advect_norm:AdvectParams, advect_tang:AdvectParams, 
+    fields:dict, low_bounds:dict,
+    advect_norm:AdvectParams, 
+    advect_tang:AdvectParams, 
+    step=0,
+    use_unmodified_corrector=False,
     proj_variant="increment",
     proj_nonlinear=False,
-    proj_iters=1, rtol=1e-3) -> dict:
+    proj_iters=1) -> dict:
 
     # Exact:      
-    #   φdu/dt = -φu*div(u) + nu*div(φgrad(u)) - φgrad(p)/rho + φS + BCu
+    #   φdu/dt = -φ(u*grad)u + nu*div(φgrad(u)) - φgrad(p)/rho + φS + BCu
     # 
     # Where: 
     #   BCu = -beta/eps^2(1 - φ)(u - g)  //no slip, g is velocity of boundary, so g = 0
@@ -571,7 +645,7 @@ def step_phase(
     #            - (grad(φp) - pgrad(φ))/rho + φS 
     #            - beta/eps^2(1 - φ)(u - g) 
     #  
-    #   du/dt  = -u*div(u) 
+    #   du/dt  = -(u*grad)u 
     #            + nu*lap(u) + nu*grad(u)*grad(φ)/φ 
     #            - (grad(φp) - pgrad(φ))/φrho + S 
     #            - beta/eps^2(1 - φ)(u - g)/φ
@@ -623,23 +697,85 @@ def step_phase(
     #    - we get non-incremental by simply assuming p=0 thus pn=q
     #    - to add rho into the procedure replace p with p/rho and q with q/rho
     #   
+    #   φdu/dt = duφ/dt - u*dφ/dt
+    # 
     #   Now we redo the procedure on our diffuse domain formulation:
-    #      du/dt = NP(u) + grad(p) + S
+    #      φdu/dt = φNP(u) + φgrad(p) + φS
+    #      div(φu) = g*grad(φ)
     #   with
     #      NP(v) = -u*div(v) + nu*lap(v) + nu*grad(v)*grad(φ)/φ + BC(v)/φ
     # 
-    BCu = [BCux, BCuy]
-    un = bc_apply_vels([uxn, uyn], BCu)
+    #   applying the same procdeure as above we get the same result 
+    #   (obviously, since we could remove φ from both sides in which case 
+    #    the only term that changed is NP which is not present)
+    #       φus = φun + dt*φgrad(q)
+    #   Now as long as φ != 0 and grad(φ) = 0 we can divide both sides by it and 
+    #   retrieve the same possion EQ as above in the classic formulation, 
+    #   verifiing it matches Helmholtz decomposition
+    #       us = un + dt*grad(q)
+    #       us = un + grad(psi).
+    # 
+    #   This proves that in the liquid domain nothing changed and classic continuity holds. 
+    #   In the solid phase or on the boundary we cannot do this so we work with the modified
+    #   equation and after applying div() get  
+    #       dt*(div(φgrad(q))) = div(φus) - div(φun) = div(φus) - g*grad(φ)
+    #   where we used the modified continiuty condition. 
+    #
+    
+    time_start = time.time_ns()
+    time_pred = 0
+    time_corr = 0
+    pred_iters = 0
+    corr_iters = 0 
 
+    BCu = [low_bounds['u'], low_bounds['v']]
+    BCp = low_bounds['p']
+    BCphi = low_bounds['f']
+
+    uxn:Velx = fields['u'] 
+    uyn:Vely = fields['v'] 
+    pn:Cell  = fields['p'] 
+    phi:Cell = fields['f']
+
+    un = bc_apply_vels([uxn, uyn], BCu)
     unk = un
     pnk = pn #todo guess
 
+    # Prepare phase vals ======================
     phim = phi + phi_delta
-    phiex = bc_expand_cell(phim, BCphi)
-    # grad_phi = Grad(phiex)
-    grad_phi = Grad_cell_to_vels(phiex)
-    lap_phi = Lap(phiex)
-    interp_phi = [Interp_cell_to_velx(phiex), Interp_cell_to_vely(phiex)]
+    ex_phi = bc_expand_cell(phim, BCphi)
+
+    grad_phi_cells = Grad(ex_phi)
+    grad_phi = Grad_cell_to_vels(ex_phi)
+
+    vel_phi = Interp_cell_to_vels(ex_phi)
+    vel_phi_corner = 1/4*(
+        ex_phi[1:,1:] + ex_phi[:-1,1:] +
+        ex_phi[1:,:-1] + ex_phi[:-1,:-1]
+    )
+    # phi on face of particular veclocity cell.
+    # So for example phi_vel_face[0] is the phase on the x-normal velocity cell 
+    # - phi_vel_face[0][0] is on x-normal face of the x-normal velocity cell 
+    # - phi_vel_face[0][1] is on y-normal face of the x-normal velocity cell (ie take faces below each other and iterpolate)
+    phi_vel_face = [
+        [ex_phi[:,1:-1], vel_phi_corner],
+        [vel_phi_corner, ex_phi[1:-1,:]]
+    ]
+
+    # Prepare wall velocity and source terms ======================
+    wallu = [0, 0]
+    vel_wallu = [[0, 0], [0, 0]]
+    if wallu_ := fields.get('wallu'):
+        wallu = wallu_
+        vel_wallu[0] = Interp_cell_to_vels(bc_expand_cell(wallu[0], BCphi))
+        vel_wallu[1] = Interp_cell_to_vels(bc_expand_cell(wallu[1], BCphi))
+
+    source = [0, 0]
+    vel_source = [[0, 0], [0, 0]]
+    if source_ := fields.get('source'):
+        source = source_
+        vel_source[0] = Interp_cell_to_vels(bc_expand_cell(source[0], BCphi))
+        vel_source[1] = Interp_cell_to_vels(bc_expand_cell(source[1], BCphi))
 
     # It doesnt make sense to do iterations on non-incremental scheme
     if proj_variant == "non-increment":
@@ -651,76 +787,143 @@ def step_phase(
             out += ae*be
         return out
 
+    def phase_project(x:np.ndarray, phase:np.ndarray, cutoff, fill = 0, copy=True):
+        if copy: x = x.copy()
+        if cutoff > -np.inf:
+            x = np.where(phase > cutoff, x, fill)
+        return x
+
+    p_corr_last = None
     for k in range(proj_iters):
-        unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
+        
+        #PREDICTOR ============================
+        ex_unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
         #interpolated one field onto the other and expanded
         # according to the others boundary conditons.
-        unktang = [ 
-            bc_expand_vely(Interp_velx_to_vely(unknorm[0]), BCu[1]),
-            bc_expand_velx(Interp_vely_to_velx(unknorm[1]), BCu[0]),
+        ex_unktang = [ 
+            bc_expand_vely(Interp_velx_to_vely(ex_unknorm[0]), BCu[1]),
+            bc_expand_velx(Interp_vely_to_velx(ex_unknorm[1]), BCu[0]),
         ]
         
-        g = [0, 0] #velocity of boundary
-        S = [0, 0] #source terms
-        grad_p = [0, 0]
-        if proj_variant != "non-increment":
-            pex = bc_expand_cell(pnk, BCp)
-            grad_p = Grad_cell_to_vels(pex)
-            
+        ex_pnk = bc_expand_cell(pnk, BCp)
+        grad_pnk = Grad_cell_to_vels(ex_pnk)
+  
         u_pred = [un[0], un[1]]
         for d in range(2):
             t = 1-d
             def pred_lhs(u:np.ndarray) -> np.ndarray:
+                nonlocal pred_iters 
+                pred_iters += 1
+
                 uex = bc_expand_vel[d](u, BCu[d])
 
-                advnorm = unknorm[d][1:-1, 1:-1]*Advect[d](uex, unknorm[d], advect_norm)
-                advtang = unktang[t][1:-1, 1:-1]*Advect[t](uex, unktang[t], advect_tang)
+                advnorm = ex_unknorm[d][1:-1, 1:-1]*Advect[d](uex, ex_unknorm[d], advect_norm)
+                advtang = ex_unktang[t][1:-1, 1:-1]*Advect[t](uex, ex_unktang[t], advect_tang)
                 adv = advnorm + advtang
 
-                grad_u = Grad(uex)
-                dif_phase = nu*dot(grad_u, grad_phi[d])/interp_phi[d]
+                dif = nu*DivGrad(phi_vel_face[d], uex)/vel_phi[d]
+                BC = -beta/(phi_eps**2) * (1 - vel_phi[d])*(u - vel_wallu[d][d])/vel_phi[d]
                 
-                dif = nu*Lap(uex)
-                BC_phase = -beta/(phi_eps**2) * (1 - interp_phi[d])*(u - g[d])/interp_phi[d]
-                
-                U = u + dt*(adv - dif - dif_phase - BC_phase)
-                U = bc_apply_vel[d](U, BCu[d], copy=False)
-                return U
+                lhs = u + dt*(adv - dif - BC)
+                lhs = bc_apply_vel[d](lhs, BCu[d], copy=False)
+                lhs = phase_project(lhs, vel_phi[d], cutoff_u, copy=False)
+                return lhs
 
-            pred_rhs = un[d] - dt/rho*grad_p[d] + dt*S[d]
-            u_pred[d], predIters = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], rtol=rtol)
-            if predIters != 0:
-                print(f"Predictor diverged! {xxx_iter}")
-                return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred, "f":phi}
-            
+            pred_rhs = un[d] + dt*vel_source[d][d]
+            if proj_variant != "non-increment": 
+                pred_rhs -= dt/rho*grad_pnk[d]
+
+            pred_rhs = phase_project(pred_rhs, vel_phi[d], cutoff_u, copy=False)
+            pred_maxiter = max(300, 3 * pred_rhs.size)
+
+            time_pred_start = time.time_ns()
+            u_pred[d], pred_iters_ret = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], maxiter=pred_maxiter)
+            time_pred += time.time_ns() - time_pred_start
+
+            if pred_iters_ret < 0:
+                print(f"Predictor ({d=}) breakdown at step {step}")
+                return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
+            if pred_iters_ret > 0:
+                print(f"Predictor ({d=}) slow convergence ({pred_iters} iters) at step {step}")
+
+        u_pred[0] = phase_project(u_pred[0], vel_phi[0], cutoff_u, fill=vel_wallu[0][0], copy=False)    
+        u_pred[1] = phase_project(u_pred[1], vel_phi[1], cutoff_u, fill=vel_wallu[0][1], copy=False)    
         u_pred = bc_apply_vels(u_pred, BCu, copy=False) 
+
         div_u_pred = Div_vels_to_cell(u_pred)
 
-        if   proj_variant == "non-increment":    corr_guess = pnk
-        elif proj_variant == "increment":        corr_guess = None
-        elif proj_variant == "increment-rot":    corr_guess = nu*div_u_pred
+        #CORRECTOR ============================
+        if p_corr_last is None:
+            if   proj_variant == "non-increment":    p_corr_last = pnk
+            elif proj_variant == "increment":        p_corr_last = None
+            elif proj_variant == "increment-rot":    p_corr_last = nu*div_u_pred
+ 
+        corr_maxiter = max(300, 3 * div_u_pred.size)
+        time_corr_start = time.time_ns()
 
-        corr_lhs = lambda p: Lap(bc_expand_cell(p, BCp))
-        corr_rhs = rho/dt*div_u_pred
-        p_corr, corrIters = matrix_free_solve(corr_lhs, corr_rhs, x0=corr_guess)
-        if corrIters != 0:
-            print(f"Corrector diverged! {xxx_iter}")
-            return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred, "f":phi}
+        #  dt*(div(grad(q))) = div(φus)
+        if use_unmodified_corrector:
+            def corr_lhs(q):
+                nonlocal corr_iters
+                corr_iters += 1
+                return Lap(bc_expand_cell(q, BCp))
+                
+            corr_rhs = rho/dt*div_u_pred
+            p_corr, corr_iters_ret = matrix_free_solve(corr_lhs, corr_rhs, x0=p_corr_last, maxiter=corr_maxiter)
+        #  dt*(div(φgrad(q))) = div(φus) - g*grad(φ)
+        else:
+            #The corrector step is where we spend about 90% of runtime therefore its important 
+            # to optimize it (within margins). We provide allocation free numpy path
+            ex_tmp = bc_expand_cell(pnk, BCp) 
+            tmpx = np.empty_like(vel_phi[0])
+            tmpy = np.empty_like(vel_phi[1])
+
+            def corr_lhs(q):
+                nonlocal corr_iters
+                corr_iters += 1
+
+                ex_q = bc_expand_cell(q, BCp, out=ex_tmp)
+                lhs = DivGrad(vel_phi, ex_q, scratch_x=tmpx, scratch_y=tmpy)
+                return phase_project(lhs, phi, cutoff_p, copy=False)
+
+            div_phi_us = Div_vels_to_cell([vel_phi[0]*u_pred[0], vel_phi[1]*u_pred[1]])
+            corr_rhs = rho/dt*(div_phi_us - dot(wallu, grad_phi_cells))
+            corr_rhs = phase_project(corr_rhs, phi, cutoff_p, copy=False)
+
+            p_corr, corr_iters_ret = matrix_free_solve(corr_lhs, corr_rhs, x0=p_corr_last, maxiter=corr_maxiter)
+            p_corr = phase_project(p_corr, phi, cutoff_p, copy=False)
         
-        p_correx = bc_expand_cell(p_corr, BCp)
-        grad_p_corr = Grad_cell_to_vels(p_correx)
+        p_corr_last = p_corr
+
+        if corr_iters_ret < 0:
+            print(f"Corrector breakdown at step {step}")
+            return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
+        if corr_iters_ret > 0:
+            print(f"Corrector slow convergence ({corr_iters} iters) at step {step}")
+
+        time_corr += time.time_ns() - time_pred_start
+        
+        #UPDATES ============================
+        grad_p_corr = Grad_cell_to_vels(bc_expand_cell(p_corr, BCp)) 
 
         u_next = [None, None]
-        u_next[0] = u_pred[0] - dt/rho*grad_p_corr[0]
-        u_next[1] = u_pred[1] - dt/rho*grad_p_corr[1]
+        u_next[0] = u_pred[0] - phase_project(dt/rho*grad_p_corr[0], vel_phi[0], cutoff_u_corr, copy=False)
+        u_next[1] = u_pred[1] - phase_project(dt/rho*grad_p_corr[1], vel_phi[1], cutoff_u_corr, copy=False)
+
+        u_next[0] = phase_project(u_next[0], vel_phi[0], cutoff_u_post, fill=vel_wallu[0][0], copy=False)    
+        u_next[1] = phase_project(u_next[1], vel_phi[1], cutoff_u_post, fill=vel_wallu[0][1], copy=False)   
         u_next = bc_apply_vels(u_next, BCu, copy=False)
 
         if   proj_variant == "non-increment":    p_next = p_corr
         elif proj_variant == "increment":        p_next = pn + p_corr
         elif proj_variant == "increment-rot":    p_next = pn + p_corr - nu*div_u_pred
+        p_next = phase_project(p_next, phi, cutoff_p_post, copy=False)
 
         unk = u_next
         pnk = p_next
+    
+    time_whole = time.time_ns() - time_start
+    print(f"time {time_whole//1e6}ms pred {pred_iters}:{int(time_pred/time_whole*100)}% corr {corr_iters}:{int(time_corr/time_whole*100)}%")
 
     assert un[0].shape == unk[0].shape
     assert un[1].shape == unk[1].shape
@@ -730,39 +933,65 @@ def step_phase(
 def main():
     # PARAMS ======================
     global nx, ny, nu, Lx, Ly, dx, dy, dt
-    nx = 40 #num cells
-    ny = 40
+    nx = 160 #num cells
+    ny = 60 
     nu = 1.3059e-5 #viscosity
     Ly = 1 #size of domain in meters
     Lx = Ly*nx/ny 
     dx = Lx/nx
     dy = Ly/ny
     dt = 4e-3
-    t0 = 0
-    t1 = 8
-    rtol = 1e-3
-    proj_iters = 1
+    t0 = 0 #begin time
+    t1 = 100 #end time
+    display_pause = 0 #pause in seconds after each iteration for debugging
+    display_every = 10 #update display every X iters. (matplotlib is slow)
 
-    # proj_variant = "non-increment"
+    proj_iters = 1 #iterations each time step to minimize splitting error caused by projection method
+    proj_variant = "non-increment"
     # proj_variant = "increment"
-    proj_variant = "increment-rot"
-    # Whether to use prev iter or best guess to next iter as 
-    # the other velocity in advection
-    proj_nonlinear = False  
+    # proj_variant = "increment-rot"
+    proj_nonlinear = False # Whether to use prev iter or best guess to next iter as the other velocity in advection
 
+    example_fields = False
+    # example_fields = True
     phase_field = True
     # phase_field = False
+    phase_filed_domain = True
+    # phase_filed_domain = False
+    
+    global phi_width, phi_eps, phi_delta, phi_cutoff 
+    phi_delta = 1e-6 #value we add to phi during calculations to regularize the equation in regions where phi=0 
+    phi_cutoff = 1e-3 #values under/above 1 minus this are considered pure wall/pure liquid
+    phi_width = 6 #width of the phase interface in cells
+    phi_eps = calc_phi_eps(phi_width) #width of the phase interface (between phi_cutoff) in real units 
+    # phi_width = calc_phi_w(phi_eps)
 
-    domain = "channel"
-    # domain = "cavity"
-    # domain = "channel_cavity"
-    # domain = "real_cavity"
+    # These control when / if the given variable will be projected 
+    # onto the phase perscribed value. If not set is not applied.
+    # Ie if cutoff_u = 0.2 then in all places where phi < 0.2, u will 
+    # be considered a wall thus will be set to the wall velocity (0).
+    global cutoff_u, cutoff_p, cutoff_u_post, cutoff_p_post, cutoff_u_corr
+    cutoff_u = 0.3 #applied during iterative solve of velocity
+    # cutoff_p = 0.2 #applied during iterative solve of pressure
+    # cutoff_u_post = 0.2 #applied at the end of the timestep
+    # cutoff_p_post = 0.5 #applied at the end of the timestep
+    # cutoff_u_corr = 0.5 #applied during corrector update of velocity
+
+    use_unmodified_corrector = False
+    # use_unmodified_corrector = True
+
     parabolic_profile = True
+
+    # domain = {'type':"channel"}
+    domain = {'type':"channel", 'circle':True, 'dot_size':0.1*Ly, 'dot_offset':2, 'dot_posx':0.2*Lx, 'dot_posy':0.5*Ly}
+    # domain = {'type':"cavity"}
+    # domain = {'type':"channel_cavity", "gap":0.2}
+    # domain = {'type':"real_cavity"}
 
     advect_norm = AdvectParams() 
     # advect_norm.variant = "flux"
     advect_norm.variant = "blend"
-    advect_norm.factor = 0.97
+    advect_norm.factor = 0.95
     advect_norm.dynamic = 0.0
     advect_norm.minblend = 0.0 
     advect_norm.maxblend = 1.0
@@ -770,22 +999,16 @@ def main():
     advect_tang = AdvectParams() 
     # advect_tang.variant = "flux"
     advect_tang.variant = "blend"
-    advect_tang.factor = 0.97
+    advect_tang.factor = 0.95
     advect_tang.dynamic = 0.0
     advect_tang.minblend = 0.0 
     advect_tang.maxblend = 1.0
-
-    example_fields = False
-    # example_fields = True
-
-    display_pause = 0
-    display_every = 25
 
     # display_field = ""
     # display_field = "p"
     # display_field = "u"
     # display_field = "v"
-    # display_field = "velmag"
+    display_field = "velmag"
     # display_field = "predu"
     # display_field = "predv"
     # display_field = "predmag"
@@ -795,79 +1018,90 @@ def main():
     # display_field = "psiu"
     # display_field = "psiv"
     # display_field = "psimag"
-    display_field = "phase"
+    # display_field = "phase"
+    # display_field = "sdf"
 
     line_color = "white"
     # line_color = "black"
     display_cell_centers = False
     display_grid = False
     display_BCs = True
-    display_velocity_arrows = True
+    display_phase_walls = True
+    display_velocity_arrows = False
     display_face_velocity_arrows = False
     display_face_velocity_arrows_offsets = False
     display_streamlines = False 
     display_streamlines_thickness = False 
 
     # initial conditions
+    boundaries, wall_mask = make_domain(domain, 0, parabolic_profile, phase_filed_domain)
+    sdf = -sdf_from_mask(wall_mask)
+    phi = sdf_to_phase_field(sdf)
+    phi_outline = marching_squares(sdf, 0)
+    
     fields = {
         "u": np.zeros((nx+1, ny)),
         "v": np.zeros((nx, ny+1)),
         "p": np.zeros((nx, ny)),
-        "f": np.zeros((nx, ny)),
+        "f": phi,
+        "sdf": sdf,
     }
 
     # Main loop
     plt.ion()
-    fig = plt.figure(figsize=(12, 10), dpi=100)
+    fig = plt.figure(figsize=(6*Lx/Ly, 6), dpi=100)
+    step = -1
+    t = t0 - dt
 
-    boundaries, wall_mask = make_domain_mask(domain, 0, parabolic_profile)
-    wall_sdf = sdf(wall_mask)
-    phi = sdf_to_phase_field(-wall_sdf)
-    
-    iter = -1
-    t = t0
-    while True:
-        if t == t1: break
-        iter += 1
-        t = min(iter*dt, t1)
+    #we calculate dt each step to fit the update. 
+    # This matters most in the last step where dt is smaller
+    normal_dt = dt 
+    while t != t1:
+        step += 1
+        t_old = t
+        t = min(t0 + step*normal_dt, t1)
+        dt = t - t_old
         
         # BOUNDARIES =========================
         u_in = min(1, t)
-        # boundaries = make_domain(domain, u_in, parabolic_profile)
-        boundaries, wall_mask = make_domain_mask(domain, u_in, parabolic_profile)
-        BCu, BCv, BCp, BCphi = Boundary.to_low_bounds(boundaries.values(), dictify=False)
+        boundaries, wall_mask = make_domain(domain, u_in, parabolic_profile, phase_filed_domain)
+        low_bounds = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
         # SIMULATE ===========================
         if example_fields:
-            fields = generate_example_fields()
+            new_fields = generate_example_fields()
         else:
             if phase_field:
-                fields = step_phase(
-                    fields["u"], fields["v"], fields["p"], phi, 
-                    BCu, BCv, BCp, BCphi,
+                new_fields = step_phase(
+                    fields, low_bounds,
+                    step=step,
+                    use_unmodified_corrector=use_unmodified_corrector,
                     proj_variant=proj_variant, 
                     proj_iters=proj_iters, 
                     proj_nonlinear=proj_nonlinear,
                     advect_norm=advect_norm, 
                     advect_tang=advect_tang)
             else:
-                fields = step(
-                    fields["u"], fields["v"], fields["p"], 
-                    BCu, BCv, BCp, 
+                new_fields = step(
+                    fields, low_bounds,
+                    step=step,
                     proj_variant=proj_variant, 
                     proj_iters=proj_iters, 
                     proj_nonlinear=proj_nonlinear,
                     advect_norm=advect_norm, 
                     advect_tang=advect_tang)
 
-        fields["f"] = phi
+        fields.update(new_fields)
         #PLOTTING ============================
-        if iter % display_every == 0:
+        if step % display_every == 0:
             fig.clf()
             ax = fig.add_subplot(111)
-            ax.set_title(f"iter = {iter} t = {float(t):.6}")
-            plot(ax, fields, BCu, BCv, BCp, BCphi, boundaries, display_field, fig,
+            ax.set_title(f"step = {step} t = {float(t):.6}")
+            plot(fig, ax, fields, boundaries, low_bounds,
+                display_field=display_field,
+                phi_outline = phi_outline,
                 line_color = line_color,
+                display_phase_walls = display_phase_walls,
                 display_cell_centers = display_cell_centers,
                 display_grid = display_grid,
                 display_BCs = display_BCs,
@@ -879,7 +1113,8 @@ def main():
             )
             fig.canvas.draw()
             fig.canvas.flush_events()
-            time.sleep(display_pause) 
+            if display_pause > 0:
+                time.sleep(display_pause) 
 
     plt.ioff()
     plt.show()
@@ -903,35 +1138,35 @@ def generate_example_fields() -> dict:
     fields["p"] = np.sin(np.pi * Xc/Lx) * np.cos(np.pi * Yc/Ly)
     return fields
 
-def make_domain(domain_variant:str, u_in:float, parabolic:bool) -> Boundaries:
-    global nx, ny, nu, Lx, Ly, dx, dy, dt
-
-    def parabolic_profile(u:float, n:int) -> np.ndarray:
+def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tuple[Boundaries, np.ndarray]:
+    def inflow_profile(u:float, n:int) -> np.ndarray:
         if parabolic == False:
             return np.full(n, u)
         centers = (np.arange(n) + 0.5)/n
         profile = u*(1 - (2*centers - 1)**2)
         return profile
 
-    if domain_variant == "channel":
-        inflow = parabolic_profile(u_in, ny)
+    wall = np.zeros((nx, ny), dtype=bool)
+    domain_variant = domain.get('type')
+    if domain_variant == "channel" and phase_field == False:
+        inflow = inflow_profile(u_in, ny)
         boundaries = Boundary.to_dict([
             Boundary.inflow("W", 0, np.arange(ny), inflow, 0),
             Boundary.outflow("E", nx-1, np.arange(ny)),
             Boundary.noslip("S", np.arange(nx), 0),
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
-    elif domain_variant == "cavity":
+    elif domain_variant == "cavity" and phase_field == False:
         boundaries = Boundary.to_dict([
             Boundary.noslip("W", 0, np.arange(ny)),
             Boundary.noslip("E", nx-1, np.arange(ny)),
             Boundary.noslip("S", np.arange(nx), 0),
             Boundary.inflow("N", np.arange(nx), ny-1, u_in, 0),
         ])
-    elif domain_variant == "real_cavity":
+    elif domain_variant == "real_cavity" and phase_field == False:
         gapW = 3
         gapE = 2
-        inflow = parabolic_profile(u_in, gapW)
+        inflow = inflow_profile(u_in, gapW)
         boundaries = Boundary.to_dict([
             Boundary.inflow("W", 0, np.arange(ny-gapW, ny), inflow, 0),
             Boundary.noslip("W", 0, np.arange(0, ny-gapW)),
@@ -943,9 +1178,9 @@ def make_domain(domain_variant:str, u_in:float, parabolic:bool) -> Boundaries:
             Boundary.noslip("S", np.arange(nx), 0),
         ])
 
-    elif domain_variant == "channel_cavity":
+    elif domain_variant == "channel_cavity" and phase_field == False:
         gap = max(ny//5, 1)
-        inflow = parabolic_profile(u_in, gap)
+        inflow = inflow_profile(u_in, gap)
         boundaries = Boundary.to_dict([
             Boundary.inflow("W", 0, np.arange(ny-gap, ny), inflow, 0),
             Boundary.noslip("W", 0, np.arange(0, ny-gap)),
@@ -954,46 +1189,10 @@ def make_domain(domain_variant:str, u_in:float, parabolic:bool) -> Boundaries:
             Boundary.noslip("S", np.arange(nx), 0),
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
-    else:
-        assert False
 
-    return boundaries
-
-def make_domain_mask(domain_variant:str, u_in:float, parabolic:bool) -> Tuple[Boundaries, np.ndarray]:
-    global nx, ny, nu, Lx, Ly, dx, dy, dt
-
-    def parabolic_profile(u:float, n:int) -> np.ndarray:
-        if parabolic == False:
-            return np.full(n, u)
-        centers = (np.arange(n) + 0.5)/n
-        profile = u*(1 - (2*centers - 1)**2)
-        return profile
-
-    if domain_variant == "channel":
-
-        # The actual domain looks like this
-        # where only the # are diffuse walls
-        #  ___________________
-        #  |#################|
-        #  >                 >
-        #  >                 >
-        #  >                 >
-        #  |#################|
-        #  -------------------
-        # 
-        # this makes it possible to correctly place the inlet
-        # outlet such that ti doesnt collide with a wall as domain such as:
-        # ______________
-        # >############>
-        # >            >
-        # >            >
-        # >            >
-        # >############>
-        # --------------
-        # would likely cause problems.
-
-        w = phi_W//2 #phase width
-        inflow = parabolic_profile(u_in, ny-2*w)
+    elif domain_variant == "channel" and phase_field == True:
+        w = phi_width//2 #wall width
+        inflow = inflow_profile(u_in, ny-2*w)
         boundaries = Boundary.to_dict([
             Boundary.noslip("W", 0, np.arange(0, w)),
             Boundary.inflow("W", 0, np.arange(w, ny-w), inflow, 0),
@@ -1007,12 +1206,46 @@ def make_domain_mask(domain_variant:str, u_in:float, parabolic:bool) -> Tuple[Bo
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
 
-        phase = np.zeros((nx, ny), dtype=bool)
-        wall_vertical = np.concatenate((np.arange(0, w),  np.arange(ny-w, ny)))
-        wall_points = np.meshgrid(np.arange(0, nx), wall_vertical)
-        phase[wall_points] = True
+        wall[:, :w] = 1
+        wall[:, -w:] = 1
+        if 'circle' in domain:
+            r   = domain['dot_size']
+            px  = domain['dot_posx']
+            py  = domain['dot_posy']
+            off = domain['dot_offset']
+            
+            x_centers = (np.arange(nx) + 0.5) * dx
+            y_centers = (np.arange(ny) + 0.5) * dy
+            Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
+            dist2 = (Xc - px)**2 + (Yc - off*dy - py)**2
+            wall[dist2 <= r**2] = 1
 
-    return (boundaries, phase)
+    if domain_variant == "channel_cavity" and phase_field == True:
+        w = phi_width//2 #wall width
+        h = max((ny - 2*w)//5, 1)
+        inflow = inflow_profile(u_in, h)
+
+        wall[:w, :] = 1
+        wall[-w:, :] = 1
+        wall[:, :w] = 1
+        wall[:, -w:] = 1
+        wall[:w, ny-(h+w):ny-w] = 0
+        wall[-w:, w:h+w] = 0
+        
+        boundaries = Boundary.to_dict([
+            Boundary.noslip("W", 0, np.arange(0, ny-(h+w))),
+            Boundary.inflow("W", 0, np.arange(ny-(h+w), ny-w), inflow, 0),
+            Boundary.noslip("W", 0, np.arange(ny-w, ny)),
+            
+            Boundary.noslip("E",  nx-1, np.arange(0, w)),
+            Boundary.outflow("E", nx-1, np.arange(w, w+h)),
+            Boundary.noslip("E",  nx-1, np.arange(w+h, ny)),
+
+            Boundary.noslip("S", np.arange(nx), 0),
+            Boundary.noslip("N", np.arange(nx), ny-1),
+        ])
+
+    return (boundaries, wall)
 
 def mask_to_boundary_list(mask: np.ndarray):
     m = mask.astype(bool)
@@ -1025,7 +1258,7 @@ def mask_to_boundary_list(mask: np.ndarray):
 
 from scipy.ndimage import distance_transform_edt
 
-def sdf(mask: np.ndarray) -> np.ndarray:
+def sdf_from_mask(mask: np.ndarray) -> np.ndarray:
     m = mask.astype(bool)
 
     dist_to_wall = distance_transform_edt(~mask, sampling=(dx, dy))
@@ -1034,14 +1267,127 @@ def sdf(mask: np.ndarray) -> np.ndarray:
     sdf = dist_to_wall - dist_to_free
     return sdf
 
-def sdf_to_phase_field(sdf:np.ndarray) -> np.ndarray:
-    # return sdf
+def sdf_to_phase_field(sdf:np.ndarray | float) -> np.ndarray | float:
     return 0.5*(1 - np.tanh(3*sdf/phi_eps))
 
+def calc_phi_eps(W:np.ndarray | float) -> np.ndarray | float:
+    # calculate transition phi eps such that
+    # sdf_to_phase_field(W*min(dx, dy)/2) == phi_cutoff 
 
+    dist = W*min(dx, dy)/2
+    eps = 3/np.atanh(1 - 2*phi_cutoff)*dist
+    if eps > 0.5:
+        eps = 1 - eps
+    return eps
+
+def calc_phi_w(phi_eps: float) -> int:
+    # np.atanh(1 - 2*delta)/3 = dist/phi_eps
+    dist = phi_eps/3*np.atanh(1 - 2*phi_cutoff)
+    return int(np.ceil(abs(dist/min(dx, dy)*2)))
+
+from collections import defaultdict
+def join_path_segments(segments):
+    def first_item(collection):
+        if len(collection) == 0:
+            return None
+        return next(iter(collection))
+
+    if len(segments) == 0:
+        return []
+
+    conectivity = defaultdict(set)
+    for line in segments:
+        p1 = (line[0], line[1])
+        p2 = (line[2], line[3])
+
+        conectivity[p1].add(p2)
+        conectivity[p2].add(p1)
+
+    lines = []
+    while len(conectivity) > 0:
+        (p1, set1) = first_item(conectivity.items())
+        if len(set1) == 0:
+            break
+
+        line = [p1]
+        while p2 := first_item(set1):
+            set2:set = conectivity[p2]
+            line.append(p2)
+            
+            set1.remove(p2)
+            set2.remove(p1)
+
+            if len(set1) == 0: conectivity.pop(p1)
+            if len(set2) == 0: conectivity.pop(p2)
+
+            set1 = set2
+            p1 = p2
+
+        lines += [np.array(line)]
+    return lines
+
+def marching_squares(field, treshold):
+    (nx, ny) = field.shape
+    discretized = field > treshold
+    states = (
+        discretized[0:nx-1, 0:ny-1]     # bot left
+        + 2*discretized[1:nx,   0:ny-1] # bot right
+        + 4*discretized[1:nx,   1:ny]   # top right
+        + 8*discretized[0:nx-1, 1:ny]   # top left
+    )
+
+    def safe_interp(t, a, b):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(np.abs(b - a) < 1e-12, 0.5, (t - a) / (b - a))
+
+    fxt_arr = safe_interp(treshold, field[:nx-1, 1:ny], field[1:nx,  1:ny])
+    fxb_arr = safe_interp(treshold, field[:nx-1, :ny-1], field[1:nx, :ny-1])
+    fyr_arr = safe_interp(treshold, field[1:nx,  :ny-1], field[1:nx,  1:ny])
+    fyl_arr = safe_interp(treshold, field[:nx-1, :ny-1], field[:nx-1, 1:ny])
+
+    lines = []
+    with_values_mask = np.logical_and(states > 0, states < 15)
+    nonzeros = np.nonzero(with_values_mask)
+    for x,y in zip(nonzeros[0], nonzeros[1]):
+        fxt = fxt_arr[x,y]
+        fxb = fxb_arr[x,y]
+        fyr = fyr_arr[x,y]
+        fyl = fyl_arr[x,y]
+
+        state = states[x,y]
+
+        if state == 1 or state == 14:
+            lines.append((x, y+fyl, x+fxb, y))
+        elif state == 2 or state == 13:
+            lines.append((x+1, y+fyr, x+fxb, y))
+        elif state == 3 or state == 12:
+            lines.append((x, y+fyl, x+1, y+fyr))
+        elif state == 4 or state == 11:
+            lines.append((x+fxt, y+1, x+1, y+fyr))
+        elif state == 5:
+            lines.append((x, y+fyl, x+fxt, y+1))
+            lines.append((x+1, y+fyr, x+fxb, y))
+        elif state == 6 or state == 9:
+            lines.append((x+fxb, y, x+fxt, y+1))
+        elif state == 7 or state == 8:
+            lines.append((x, y+fyl, x+fxt, y+1))
+        elif state == 10:
+            lines.append((x, y+fyl, x+fxb, y))
+            lines.append((x+fxt, y+1, x+1, y+fyr))
+        else:
+            assert False 
+
+    lines = np.array(lines)
+    return lines
+
+
+from scipy.ndimage import zoom
 from matplotlib.collections import LineCollection
-def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
+def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict, 
+    display_field = None,
+    phi_outline = None,
     line_color = "white",
+    display_phase_walls = False,
     display_cell_centers = False,
     display_grid = False,
     display_BCs = True,
@@ -1053,9 +1399,9 @@ def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
 ):
     dd = min(dx, dy)
 
-    pex = bc_expand_cell(fields["p"], BCp)
-    uex = bc_expand_velx(fields["u"], BCu)
-    vex = bc_expand_vely(fields["v"], BCv)
+    ex_p = bc_expand_cell(fields["p"], low_bounds['p'])
+    uex = bc_expand_velx(fields["u"], low_bounds['u'])
+    vex = bc_expand_vely(fields["v"], low_bounds['v'])
 
     ax.set_xlim(-dx, (nx + 1) * dx)
     ax.set_ylim(-dy, (ny + 1) * dy)
@@ -1067,7 +1413,7 @@ def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
 
     # Field drawing
     display_field_tuple = None
-    if   display_field == "p":      display_field_tuple = (pex, "pressure")
+    if   display_field == "p":      display_field_tuple = (ex_p, "pressure")
     elif display_field == "u":      display_field_tuple = (velx, "velocity u")
     elif display_field == "v":      display_field_tuple = (vely, "velocity v")
     elif display_field == "velmag": display_field_tuple = (velmag, "velocity magnitude")
@@ -1092,9 +1438,10 @@ def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
         if display_field == "psiu": display_field_tuple = (psiu, "psiu")
         if display_field == "psiv": display_field_tuple = (psiv, "psiv")
         if display_field == "psimag": display_field_tuple = (np.hypot(ipsi[0], ipsi[1]), "psimag")
-
-    if display_field == "phase" and "f" in fields:
-        display_field_tuple = (bc_expand_cell(fields["f"], BCf), "phase")
+    elif display_field == "phase" and "f" in fields:
+        display_field_tuple = (bc_expand_cell(fields["f"], low_bounds['f']), "phase")
+    elif display_field == "sdf" and "sdf" in fields and "f" in fields:
+        display_field_tuple = (bc_expand_cell(fields["sdf"], low_bounds['f']), "phase")
 
     if display_field_tuple is not None:
         im = ax.imshow(display_field_tuple[0].T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
@@ -1127,7 +1474,11 @@ def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
 
     # velocity arrows
     if display_velocity_arrows:
-        ax.quiver(Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1], scale=1/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=1)
+        scale = np.sqrt(30*30 / velx.size)
+        stacked = [Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1]]
+        zoomed = [zoom(s, zoom=scale, order=1) if scale < 1 else stacked for s in stacked]
+        px, py, vx, vy = zoomed[0], zoomed[1], zoomed[2], zoomed[3]
+        ax.quiver(px, py, vx, vy, scale=scale/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=1)
 
     # velocity grid
     if display_face_velocity_arrows:
@@ -1153,6 +1504,13 @@ def plot(ax, fields:dict, BCu, BCv, BCp, BCf, boundaries, display_field, fig,
             lw = lw.T
             density = 2
         ax.streamplot(Xc[:,0], Yc[0,:], velx[1:-1,1:-1].T, vely[1:-1,1:-1].T, color=line_color, density=density, linewidth=lw, arrowsize=0.7)
+
+    if display_phase_walls and phi_outline is not None:
+        dx_dy = np.array([dx, dy])
+        e1 = (phi_outline[:, 0:2] + 0.5) * dx_dy
+        e2 = (phi_outline[:, 2:4] + 0.5) * dx_dy
+        lc = LineCollection(np.stack([e1, e2], axis=1), colors=line_color, linewidths=1, capstyle="butt")
+        ax.add_collection(lc)
 
     # boundaries
     for b in boundaries.values():

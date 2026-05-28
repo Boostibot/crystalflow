@@ -1011,7 +1011,7 @@ def step_phase(
     advect_norm:AdvectParams, 
     advect_tang:AdvectParams, 
     step=0,
-    use_unmodified_corrector=False,
+    proj_phase_corrector=False,
     proj_variant="increment",
     proj_nonlinear=False,
     proj_iters=1) -> dict:
@@ -1180,11 +1180,28 @@ def step_phase(
             x = np.where(phase > cutoff, x, fill)
         return x
 
+    #PREDICTOR ============================
     p_corr_last = None
     for k in range(proj_iters):
-        
-        #PREDICTOR ============================
-        ex_unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
+
+        unknorm = unk if proj_nonlinear else un
+
+        # > The projection should act more as a way to save 
+        #  processing time / avoid solving the problem in 
+        #  undefined regions rather than something that effects 
+        #  the simulation. It is a very crude instrument.
+
+        # > I want to "motivate" the velocity field to be correct
+        # that is it should roughly follow the phase curve as to how much it conforms
+        # to wall velocity. at < 0.5 not at all, then [0.5, 1] lerp to wall_velocity.
+
+        # TODO control via params
+        # unknorm = [
+        #     np.minimum(2*vel_phi[0] + 2, 1)*unknorm[0],
+        #     np.minimum(2*vel_phi[1] + 2, 1)*unknorm[1],
+        # ]
+
+        ex_unknorm = bc_expand_vels(unknorm, BCu)
         #interpolated one field onto the other and expanded
         # according to the others boundary conditons.
         ex_unktang = [ 
@@ -1206,39 +1223,6 @@ def step_phase(
         #    |       |       |       |
         #    o---V---o---V---o---V---o
 
-        def interpx(u): 0.5*(u[1:,:] + u[:-1,:])
-        def interpy(u): 0.5*(u[:,1:] + u[:,:-1])
-
-        cell_un = [
-            interpx(ex_unknorm[0][:,1:-1]),
-            interpy(ex_unknorm[1][:,1:-1]),
-        ]
-
-        # velocities at corners of pressure cells
-        corner_un = [
-            interpy(ex_unknorm[0][1:-1,:]),
-            interpx(ex_unknorm[1][1:-1,:]),
-        ]
-
-        vel_face_un_redux = [
-            [cell_un[0], corner_un[0]],
-            [corner_un[1], cell_un[1]],
-        ]
-
-        # velocities on faces of velocity cells
-        vel_face_un = [
-            # velocities on faces of x-velocity cells
-            [
-                cell_un, # velocity on x-face of x-velocity cells
-                corner_un, # velocity on y-face of x-velocity cells
-            ],
-            # velocities on faces of y velocity cells
-            [
-                corner_un, # velocity on x-face of y-velocity cells
-                cell_un, # velocity on y-face of y-velocity cells
-            ]
-        ]
-
         cell_unk = [
             Interp_vels_to_cellx(ex_unknorm[0]),
             Interp_vels_to_celly(ex_unknorm[1]),
@@ -1251,9 +1235,6 @@ def step_phase(
             0.5*(ex_unknorm[0][1:-1, 1:] + ex_unknorm[0][1:-1, :-1]),
             0.5*(ex_unknorm[1][1:, 1:-1] + ex_unknorm[1][:-1, 1:-1]),
         ]
-        # stupid_face = [
-        #     [interpx(ex_unknorm[d][:,1:-1]), interpy() ]
-        # ]
 
         ex_pnk = bc_expand_cell(pnk, BCp)
         grad_pnk = Grad_cell_to_vels(ex_pnk)
@@ -1386,7 +1367,7 @@ def step_phase(
         time_corr_start = time.time_ns()
 
         #  dt*(div(grad(q))) = div(φus)
-        if use_unmodified_corrector:
+        if proj_phase_corrector == False:
             def corr_lhs(q):
                 nonlocal corr_iters
                 corr_iters += 1
@@ -1476,6 +1457,15 @@ def step_phase(
 
 def main():
 
+    # TODO: Cleanup old advection functions
+    # TODO: Add advection types etc
+    # TODO: Optimize predictor
+    # TODO: Add pnk, unk guessing based on orevious timesteps!
+    # TODO: try the fake dimming inside walls approach
+    # TODO: test conservativness
+    # TODO: implement open boundary type
+    # TODO: implement moving boundary type
+
     # PARAMS ======================
     global nx, ny, nu, Lx, Ly, dx, dy, dt
     nx = 270 #num cells
@@ -1487,44 +1477,57 @@ def main():
     dy = Ly/ny
     dt = 4e-3
     t0 = 0 #begin time
-    t1 = 8 #end time
+    t1 = 4.5 #end time
     display_pause = 0 #pause in seconds after each iteration for debugging
     display_every = 25 #update display every X iters. (matplotlib is slow)
 
+    global rho, beta, phi_width, phi_eps, phi_delta, phi_cutoff
+    rho = 1 #density.
+    beta = 0.02 #strength of phase imposed boundary conditions
+    phi_delta = 1e-6 #value we add to phi during calculations to regularize the equation in regions where phi=0 
+    phi_cutoff = 1e-3 #values under/above 1 minus this are considered pure wall/pure liquid
+    phi_width = 8 #width of the phase interface in cells
+    phi_eps = calc_phi_eps(phi_width) #width of the phase interface (between phi_cutoff) in real units 
+    # phi_width = calc_phi_w(phi_eps)
+    
     proj_iters = 1 #iterations each time step to minimize splitting error caused by projection method
     # proj_variant = "non-increment"
     proj_variant = "increment"
     # proj_variant = "increment-rot"
-    proj_nonlinear = True # Whether to use prev iter or best guess to next iter as the other velocity in advection
+    #whether to use extrapolation from several prev several 
+    # iters to obtain a guess for the next value. When 
+    proj_guess_p = True 
+    proj_guess_u = True 
 
-    example_fields = False
-    # example_fields = True
-    phase_field = True
-    # phase_field = False
-    phase_filed_domain = True
-    # phase_filed_domain = False
+    #if true uses guessed variables as prev iter during predictor 
+    # if false uses them only as x0 in linear matrix solve,
+    proj_guess_predictor = True
+
+    # Whether to use "prev iter" (or guessed) or previous iterate as 
+    # the other velocity in advection. Does nothing if proj_iters = 1.
+    proj_nonlinear = True 
     
-    global phi_width, phi_eps, phi_delta, phi_cutoff 
-    phi_delta = 1e-6 #value we add to phi during calculations to regularize the equation in regions where phi=0 
-    phi_cutoff = 1e-3 #values under/above 1 minus this are considered pure wall/pure liquid
-    phi_width = 10 #width of the phase interface in cells
-    phi_eps = calc_phi_eps(phi_width) #width of the phase interface (between phi_cutoff) in real units 
-    # phi_width = calc_phi_w(phi_eps)
+    # Whether to use the proper phase-avare poisson solve or 
+    # the classic phase-oblivious poisson solve
+    proj_phase_corrector = True
 
     # These control when / if the given variable will be projected 
     # onto the phase perscribed value. If not set is not applied.
     # Ie if cutoff_u = 0.2 then in all places where phi < 0.2, u will 
     # be considered a wall thus will be set to the wall velocity (0).
     global cutoff_u, cutoff_p, cutoff_u_post, cutoff_p_post, cutoff_u_corr
-    cutoff_u = 0.3 #applied during iterative solve of velocity
+    cutoff_u = 0.1 #applied during iterative solve of velocity
     # cutoff_p = 0.2 #applied during iterative solve of pressure
     # cutoff_u_post = 0.2 #applied at the end of the timestep
     # cutoff_p_post = 0.5 #applied at the end of the timestep
     # cutoff_u_corr = 0.5 #applied during corrector update of velocity
-
-    use_unmodified_corrector = False
-    # use_unmodified_corrector = True
-
+    
+    example_fields = False
+    # example_fields = True
+    phase_field = True
+    # phase_field = False
+    phase_filed_domain = True
+    # phase_filed_domain = False
     parabolic_profile = True
 
     # domain = {'type':"channel"}
@@ -1536,7 +1539,7 @@ def main():
     advect_norm = AdvectParams() 
     advect_norm.variant = "flux"
     # advect_norm.variant = "blend"
-    advect_norm.factor = 0.65
+    advect_norm.factor = 0.85
     advect_norm.dynamic = 0.0
     advect_norm.minblend = 0.0 
     advect_norm.maxblend = 1.0
@@ -1544,7 +1547,7 @@ def main():
     advect_tang = AdvectParams() 
     advect_tang.variant = "flux"
     # advect_tang.variant = "blend"
-    advect_tang.factor = 0.65
+    advect_tang.factor = 0.85
     advect_tang.dynamic = 0.0
     advect_tang.minblend = 0.0 
     advect_tang.maxblend = 1.0
@@ -1572,6 +1575,7 @@ def main():
     display_grid = False
     display_BCs = True
     display_phase_walls = True
+    display_phase_cutoff = True
     display_velocity_arrows = False
     display_face_velocity_arrows = False
     display_face_velocity_arrows_offsets = False
@@ -1579,10 +1583,11 @@ def main():
     display_streamlines_thickness = False 
 
     # initial conditions
-    boundaries, wall_mask = make_domain(domain, 0, parabolic_profile, phase_filed_domain)
-    sdf = -sdf_from_mask(wall_mask)
+    boundaries, sdf = make_domain(domain, 0, parabolic_profile, phase_filed_domain)
     phi = sdf_to_phase_field(sdf)
     phi_outline = marching_squares(sdf, 0)
+
+    cutoff_outline = marching_squares(phi, cutoff_u)
     
     fields = {
         "u": np.zeros((nx+1, ny)),
@@ -1611,7 +1616,7 @@ def main():
         
         # BOUNDARIES =========================
         u_in = min(1, t)
-        boundaries, wall_mask = make_domain(domain, u_in, parabolic_profile, phase_filed_domain)
+        boundaries, sdf = make_domain(domain, u_in, parabolic_profile, phase_filed_domain)
         low_bounds = Boundary.to_low_bounds(boundaries.values(), dictify=False)
 
         # SIMULATE ===========================
@@ -1622,7 +1627,7 @@ def main():
                 new_fields = step_phase(
                     fields, low_bounds,
                     step=step,
-                    use_unmodified_corrector=use_unmodified_corrector,
+                    proj_phase_corrector=proj_phase_corrector,
                     proj_variant=proj_variant, 
                     proj_iters=proj_iters, 
                     proj_nonlinear=proj_nonlinear,
@@ -1647,8 +1652,10 @@ def main():
             plot(fig, ax, fields, boundaries, low_bounds,
                 display_field=display_field,
                 phi_outline = phi_outline,
+                cutoff_outline = cutoff_outline,
                 line_color = line_color,
                 display_phase_walls = display_phase_walls,
+                display_phase_cutoff = display_phase_cutoff,
                 display_cell_centers = display_cell_centers,
                 display_grid = display_grid,
                 display_BCs = display_BCs,
@@ -1699,7 +1706,7 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
         profile = u*(1 - (2*centers - 1)**2)
         return profile
 
-    wall = np.zeros((nx, ny), dtype=bool)
+    sdf = np.zeros((nx, ny))
     domain_variant = domain.get('type')
     if domain_variant == "channel" and phase_field == False:
         inflow = inflow_profile(u_in, ny)
@@ -1759,8 +1766,11 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
 
+        wall = np.zeros((nx, ny), dtype=bool)
         wall[:, :w] = 1
         wall[:, -w:] = 1
+        sdf = sdf_from_mask(wall)
+
         if 'circle' in domain:
             r   = domain['dot_size']
             px  = domain['dot_posx']
@@ -1770,20 +1780,22 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
             x_centers = (np.arange(nx) + 0.5) * dx
             y_centers = (np.arange(ny) + 0.5) * dy
             Xc, Yc = np.meshgrid(x_centers, y_centers, indexing='ij')
-            dist2 = (Xc - px)**2 + (Yc - off*dy - py)**2
-            wall[dist2 <= r**2] = 1
+            dot_sdf = np.hypot(Xc - px, Yc - off*dy - py) - r
+            sdf = np.minimum(sdf, dot_sdf)
 
     if domain_variant == "channel_cavity" and phase_field == True:
         w = phi_width//2 #wall width
         h = max((ny - 2*w)//5, 1)
         inflow = inflow_profile(u_in, h)
 
+        wall = np.zeros((nx, ny), dtype=bool)
         wall[:w, :] = 1
         wall[-w:, :] = 1
         wall[:, :w] = 1
         wall[:, -w:] = 1
         wall[:w, ny-(h+w):ny-w] = 0
         wall[-w:, w:h+w] = 0
+        sdf = sdf_from_mask(wall)
         
         boundaries = Boundary.to_dict([
             Boundary.noslip("W", 0, np.arange(0, ny-(h+w))),
@@ -1798,7 +1810,7 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
 
-    return (boundaries, wall)
+    return (boundaries, sdf)
 
 def mask_to_boundary_list(mask: np.ndarray):
     m = mask.astype(bool)
@@ -1821,7 +1833,7 @@ def sdf_from_mask(mask: np.ndarray) -> np.ndarray:
     return sdf
 
 def sdf_to_phase_field(sdf:np.ndarray | float) -> np.ndarray | float:
-    return 0.5*(1 - np.tanh(3*sdf/phi_eps))
+    return 0.5*(1 - np.tanh(-3*sdf/phi_eps))
 
 def calc_phi_eps(W:np.ndarray | float) -> np.ndarray | float:
     # calculate transition phi eps such that
@@ -1939,8 +1951,10 @@ from matplotlib.collections import LineCollection
 def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict, 
     display_field = None,
     phi_outline = None,
+    cutoff_outline = None,
     line_color = "white",
     display_phase_walls = False,
+    display_phase_cutoff = False,
     display_cell_centers = False,
     display_grid = False,
     display_BCs = True,
@@ -2063,6 +2077,13 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
         e1 = (phi_outline[:, 0:2] + 0.5) * dx_dy
         e2 = (phi_outline[:, 2:4] + 0.5) * dx_dy
         lc = LineCollection(np.stack([e1, e2], axis=1), colors=line_color, linewidths=1, capstyle="butt")
+        ax.add_collection(lc)
+    
+    if display_phase_cutoff and cutoff_outline is not None and len(cutoff_outline) > 0:
+        dx_dy = np.array([dx, dy])
+        e1 = (cutoff_outline[:, 0:2] + 0.5) * dx_dy
+        e2 = (cutoff_outline[:, 2:4] + 0.5) * dx_dy
+        lc = LineCollection(np.stack([e1, e2], axis=1), colors="red", linewidths=1, capstyle="butt")
         ax.add_collection(lc)
 
     # boundaries

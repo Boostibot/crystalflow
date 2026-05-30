@@ -1,0 +1,53 @@
+OUTLINE
+
+Intro etc
+
+Modeling:
+- NSE 
+- Diffuse domain approach
+- boundary conditions
+- initial value problem 
+
+Solution methods:
+- coupled matrix system
+- Projection method
+    - derivation
+    - iterated method
+    - derivation for phase field modification
+    - boundary conditions for projection method
+
+Discretization:
+- staggered grid
+    - boundary treatment on staggered grid (Here ?)
+- FVM discretization
+    - conservativness & advection
+    - flux limitting (pictures!)
+- crank nicolson
+- fully discrete scheme
+
+Implementation (This chapter is the only optional one thus can be trimmed significantly):
+- handling of phi=0 (it is here we introduce cutoff!)
+- numerical methods
+    - pseudocode of bigcstab
+- preconditioning
+    - pseudocode of preconditioning
+- gpu acceleration
+    - reintroduce primitives (map, tiled_map, reduce)
+
+Results:
+- outline of test cases (channel, channel moving wall, ball stable, ball shedding)
+- outline of base parameters (roughly water at 0 degrees)
+- outline of errors (same as 2026 paper)
+- comparison against analytical solution (convergence as n->inf?)
+- comparison against non-phase-field solution (convergence as n->inf?)
+- effect of phase BC strength (inside, just right, outside + what does this param depend on?)
+- effect of phase width (4, 8, 12, 16 - outcome?)
+- effect of flux limitter (late shedding - upwind, van-leer, van-albada. No clear winner expected)
+- effect of iteration (early on shedding, 1, 2, 3, ... 12)
+   - Show that from some iters the result is the same produce the same result. error vs 12
+- effect of cutoff (zoomed visual comparison + graph of runtime)
+   - Show that difference is small and runtime differs a lot
+- comparison of runtime (python, c++ cpu single core, cuda 3060, cuda A100)
+    - show how many CPU cores on perfect parallelism would be needed to match cuda.
+
+Outro etc

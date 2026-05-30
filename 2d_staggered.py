@@ -6,27 +6,6 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Literal, Callable, Iterable, Union
 
-from platform import system
-def plt_maximize():
-    # See discussion: https://stackoverflow.com/questions/12439588/how-to-maximize-a-plt-show-window-using-python
-    backend = plt.get_backend()
-    cfm = plt.get_current_fig_manager()
-    if backend == "wxAgg":
-        cfm.frame.Maximize(True)
-    elif backend == "TkAgg":
-        if system() == "Windows":
-            cfm.window.state("zoomed")  # This is windows only
-        else:
-            cfm.resize(*cfm.window.maxsize())
-    elif backend == "QT4Agg":
-        cfm.window.showMaximized()
-    elif callable(getattr(cfm, "full_screen_toggle", None)):
-        if not getattr(cfm, "flag_is_max", None):
-            cfm.full_screen_toggle()
-            cfm.flag_is_max = True
-    else:
-        raise RuntimeError("plt_maximize() is not implemented for current backend:", backend)
-
 R_spec = 287
 T = 272 + 20
 c_sound = 343
@@ -34,22 +13,15 @@ c_sound = 343
 # Predeclared globals. The values are set in the main function
 nx, ny, nu, rho, Lx, Ly, dx, dy, dt = 0, 0, 0, 0, 0, 0, 0, 0, 0
 rho = 1
-beta = 0.002
-# phi_eps = 0.1
-phi_width = 8
-phi_eps = 0.001
-phi_delta = 1e-4
-phi_cutoff = 0.4
-
-def get_cfl(u):
-    return np.max(np.abs(u)*dt/dx)
-
-def get_mach_number(u):
-    return np.max(np.abs(u)/c_sound)
+beta = 0
+phi_width = 0
+phi_eps = 0
+phi_delta = 0
+phi_cutoff = 0
 
 Side         = Literal["N", "S", "E", "W"]
 LowBoundType = Literal["val", "der"]
-BoundaryType = Literal["inflow", "outflow", "wall"]
+BoundaryType = Literal["inflow", "outflow", "noslip", "slip"]
 
 Cell = np.ndarray
 Velx = np.ndarray
@@ -141,14 +113,14 @@ class Boundary: #High level boundary for the whole simulation
     
     @staticmethod
     def to_dict(bounds:Iterable['Boundary']) -> Dict[str, 'Boundary']:
-        out:Dict['Boundary'] = dict()
+        out = dict()
         for b in bounds:
             name = b.type + b.side
             out[name] = Boundary.concat(out.get(name), b)
         return out
     
     @staticmethod
-    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> Tuple[LowBounds, LowBounds, LowBounds]:
+    def to_low_bounds(bounds:Iterable['Boundary'], dictify=True) -> dict:
         ubs = {}
         vbs = {}
         pbs = {}
@@ -187,19 +159,6 @@ def _bc_fill_corners_pipe(out:np.ndarray):
     out[-1,0] = out[-2,0]
     out[-1,-1] = out[-2,-1]
 
-#    o---V---o---V---o---V---o
-#    |       |       |       |
-#    >   O   >   O   >   O   >
-#    |       |       |       |
-#    o---V---X---V---X---V---o
-#    |       |       |       |
-#    >   O   >   O   >   O   > 
-#    |       |       |       |
-#    o---V---X---V---X---V---o
-#    |       |       |       |
-#    >   O   >   O   >   O   >
-#    |       |       |       |
-#    o---V---o---V---o---V---o
 
 def bc_expand_velx(f:Velx, bcs:LowBounds, out=None) -> VelxEx:
     if out is None:
@@ -243,17 +202,14 @@ def bc_expand_vely(f:Vely, bcs:LowBounds, out=None) -> VelyEx:
     else:
         out[1:-1, 1:-1] = f
 
-    out = np.zeros((f.shape[0] + 2, f.shape[1] + 2), dtype=f.dtype)
-    out[1:-1, 1:-1] = f
-
     for type_side, bc in bcs.items():
         x, y, val = bc.xs+1, bc.ys+1, bc.value
         # directly on the boundary
         if type_side == "valS": out[x, y] = val; out[x, y-1] = val
         elif type_side == "valN": out[x, y+1] = val; out[x, y+2] = val
         # directly on the boundary, so that central der matches
-        elif type_side == "derS": out[x, y-1] = out[x, y+1] - 2*val*dx
-        elif type_side == "derN": out[x, y+2] = out[x, y  ] + 2*val*dx
+        elif type_side == "derS": out[x, y-1] = out[x, y+1] - 2*val*dy
+        elif type_side == "derN": out[x, y+2] = out[x, y  ] + 2*val*dy
         
         # boundary between cells in tangential direction
         elif type_side == "valW": 
@@ -263,11 +219,11 @@ def bc_expand_vely(f:Vely, bcs:LowBounds, out=None) -> VelyEx:
             out[x+1, y+0] = 2*val - out[x, y+0]
             out[x+1, y+1] = 2*val - out[x, y+1]
         elif type_side == "derW": 
-            out[x-1, y+0] = out[x, y+0] - val*dy
-            out[x-1, y+1] = out[x, y+1] - val*dy
+            out[x-1, y+0] = out[x, y+0] - val*dx
+            out[x-1, y+1] = out[x, y+1] - val*dx
         elif type_side == "derE": 
-            out[x+1, y+0] = out[x, y+0] + val*dy
-            out[x+1, y+1] = out[x, y+1] + val*dy
+            out[x+1, y+0] = out[x, y+0] + val*dx
+            out[x+1, y+1] = out[x, y+1] + val*dx
 
     _bc_fill_corners_pipe(out)
     return out
@@ -322,7 +278,7 @@ def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, x0:np.
     Boff = (b - offset).flat
 
     Aop = sp.sparse.linalg.LinearOperator((len(Boff), len(Boff)), matvec=Aoff, dtype=b.dtype)
-    xflat = x0.flat if x0 is not None else None
+    xflat = x0.copy().flat if x0 is not None else None
     xN, iters = sp.sparse.linalg.bicgstab(Aop, Boff, x0=xflat, rtol=rtol, atol=atol, maxiter=maxiter)
     # xN, iters = sp.sparse.linalg.cgs(Aop, Boff, x0=xflat, rtol=rtol, atol=atol, maxiter=maxiter)
 
@@ -334,38 +290,36 @@ def matrix_free_solve(A:Callable[np.ndarray, [np.ndarray]], b:np.ndarray, x0:np.
 
 # Difference operators taking expanded field and returning just the field (eliminates ghost cells)
 
-# interpolate (for Interp_velx_to_vely: input x field, output interpolated to y field for Interp_vely_to_velx in reverse)
-def Interp_velx_to_vely(f:VelxEx) -> Vely: 
+# interpolate (for interp_velx_to_vely: input x field, output interpolated to y field for interp_vely_to_velx in reverse)
+def interp_velx_to_vely(f:VelxEx) -> Vely: 
     # base to match shapes: [1:-1, 1:-1] -> [1:-2,1:]
     # interp between [0, -1], [0, 0], [1, -1], [1, 0] thus the below ranges (add to base shape)
     return 1/4*(f[1:-2,:-1] + f[1:-2,1:] + f[2:-1,:-1] + f[2:-1, 1:])
 
-def Interp_vely_to_velx(f:VelyEx) -> Velx: 
+def interp_vely_to_velx(f:VelyEx) -> Velx: 
     # base to match shapes: [1:-1, 1:-1] -> [1:,1:-2]
     # interp between [-1, 0], [0, 0], [-1, 1], [0, 1] thus the below ranges (add to base shape)
-    # should be just transposed Interp_velx_to_vely shapes!
+    # should be just transposed interp_velx_to_vely shapes!
     return 1/4*(f[:-1,1:-2] + f[1:,1:-2] + f[:-1,2:-1] + f[1:,2:-1])
 
 # Interpolate velocity field to cell 
-def Interp_vels_to_cellx(f:VelxEx) -> Cell: return 1/2*(f[1:,:] + f[:-1,:])
-def Interp_vels_to_celly(f:VelyEx) -> Cell: return 1/2*(f[:,1:] + f[:,:-1])
-def Interp_vels_to_cell_nearestx(f:VelxEx) -> Cell: return f[:-1,:]
-def Interp_vels_to_cell_nearesty(f:VelyEx) -> Cell: return f[:,:-1]
-def Interp_cell_to_velx(c:CellEx) -> Velx: return 0.5*(c[:-1,1:-1] + c[1:,1:-1])
-def Interp_cell_to_vely(c:CellEx) -> Vely: return 0.5*(c[1:-1,:-1] + c[1:-1,1:])
+def interp_vels_to_cellx(f:VelxEx) -> CellEx: return 1/2*(f[1:,:] + f[:-1,:])
+def interp_vels_to_celly(f:VelyEx) -> CellEx: return 1/2*(f[:,1:] + f[:,:-1])
+def interp_cell_to_velx(c:CellEx) -> Velx: return 0.5*(c[:-1,1:-1] + c[1:,1:-1])
+def interp_cell_to_vely(c:CellEx) -> Vely: return 0.5*(c[1:-1,:-1] + c[1:-1,1:])
 
-def Interp_cell_to_vels(c:CellEx) -> List[np.ndarray]: 
-    return [Interp_cell_to_velx(c), Interp_cell_to_vely(c)]
+def interp_cell_to_vels(c:CellEx) -> List[np.ndarray]: 
+    return [interp_cell_to_velx(c), interp_cell_to_vely(c)]
 
 # first derivative
-def Centralx(u:FieldEx, f=None) -> Field: 
+def centralx(u:FieldEx, f=None) -> Field: 
     if f is None:    
         return (u[2:, 1:-1] - u[:-2, 1:-1])*(1/(2*dx))
     uf = u[1:,1:-1] + u[:-1,1:-1]
     prod = uf*(1/(2*dx)*f)
     return np.diff(prod, axis=0)
 
-def Centraly(u:FieldEx, f=None) -> Field: 
+def centraly(u:FieldEx, f=None) -> Field: 
     if f is None:    
         return (u[1:-1, 2:] - u[1:-1, :-2])*(1/(2*dy))
     uf = u[1:-1,1:] + u[1:-1,:-1]
@@ -373,102 +327,65 @@ def Centraly(u:FieldEx, f=None) -> Field:
     return np.diff(prod, axis=1)
 
 # first derivative upwind
-def Upwindx(f:VelxEx, dir_f:VelxEx = None) -> Velx: 
-    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
-    dxn = (f[1:-1, 1:-1] - f[:-2, 1:-1])/dx
-    dxp = (f[2:, 1:-1] - f[1:-1, 1:-1])/dx
-    mask = (dir_f >= 0)
-    return np.where(mask, dxn, dxp)
-
-def Upwindy(f:VelyEx, dir_f:VelyEx = None) -> Vely: 
-    dir_f = f[1:-1, 1:-1] if dir_f is None else dir_f
-    dxn = (f[1:-1, 1:-1] - f[1:-1, :-2])/dy
-    dxp = (f[1:-1, 2:] - f[1:-1, 1:-1])/dy
-    mask = (dir_f >= 0)
-    return np.where(mask, dxn, dxp)
-
-def Upwindx_conservative(u, dir_f, f=None): 
+def upwindx(u, dir_f, f=None): 
     if f is None: f = 1
     out = np.where(dir_f >= 0, u[:-1, 1:-1], u[1:, 1:-1])
     np.multiply(out, f / dx, out=out)
     return out[1:, :] - out[:-1, :]
     
-def Upwindy_conservative(u, dir_f, f=None): 
+def upwindy(u, dir_f, f=None): 
     if f is None: f = 1
     out = np.where(dir_f >= 0, u[1:-1, :-1], u[1:-1, 1:])
     np.multiply(out, f / dy, out=out)
     return out[:, 1:] - out[:, :-1]
 
 # second derivative
-def Central2x(f:FieldEx) -> Field: return np.diff(f[:,1:-1], n=2, axis=0) * (1/dx**2)
-def Central2y(f:FieldEx) -> Field: return np.diff(f[1:-1,:], n=2, axis=1) * (1/dy**2)
+def central2x(f:FieldEx) -> Field: return np.diff(f[:,1:-1], n=2, axis=0) * (1/dx**2)
+def central2y(f:FieldEx) -> Field: return np.diff(f[1:-1,:], n=2, axis=1) * (1/dy**2)
 
-def DivGradfx(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
+def div_gradfx(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
     du = np.diff(u[:, 1:-1], axis=0)   # u[1:,1:-1] - u[:-1,1:-1]
     np.multiply(du, faces, out=du)     # du *= faces
     return np.diff(du, axis=0) * (1/dx**2)
 
-def DivGradfy(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
+def div_gradfy(faces: np.ndarray, u: np.ndarray) -> np.ndarray:
     du = np.diff(u[1:-1, :], axis=1)   # u[1:-1,1:] - u[1:-1,:-1]
     np.multiply(du, faces, out=du)     # du *= faces
     return np.diff(du, axis=1) * (1/dy**2)
 
-def DivGrad_slow(faces:List[np.ndarray], cells:FieldEx) -> Field: 
-    return DivGradfx(faces[0], cells) + DivGradfy(faces[1], cells) 
+def div_grad(faces:List[np.ndarray], cells:FieldEx) -> Field: 
+    return div_gradfx(faces[0], cells) + div_gradfy(faces[1], cells) 
 
-# Optimized version 
-def DivGrad(faces, cells, out=None, scratch_x=None, scratch_y=None):
-    fx, fy = faces
-    dtype = np.result_type(cells, fx, fy, 0.0)
-    if out is None:
-        out = np.empty((cells.shape[0] - 2, cells.shape[1] - 2), dtype=dtype)
-    if scratch_x is None:
-        scratch_x = np.empty_like(fx, dtype=dtype)
-    if scratch_y is None:
-        scratch_y = np.empty_like(fy, dtype=dtype)
+def grad(ex:FieldEx)-> Field:       return [centralx(ex),  centraly(ex)]
+def div(ex:List[FieldEx]) -> Field: return centralx(ex[0]) + centraly(ex[1])
+def lap(ex:FieldEx) -> Field:       return central2x(ex) + central2y(ex)
 
-    np.subtract(cells[1:, 1:-1], cells[:-1, 1:-1], out=scratch_x)
-    np.multiply(scratch_x, fx, out=scratch_x)
-    np.subtract(scratch_x[1:], scratch_x[:-1], out=out)
-    out *= 1.0 / dx**2
-
-    np.subtract(cells[1:-1, 1:], cells[1:-1, :-1], out=scratch_y)
-    np.multiply(scratch_y, fy, out=scratch_y)
-    np.subtract(scratch_y[:, 1:], scratch_y[:, :-1], out=scratch_x[:-1])
-    scratch_x[:-1] *= 1.0 / dy**2
-    out += scratch_x[:-1]
-
-    return out
-
-def Grad(ex:FieldEx)-> Field:       return [Centralx(ex),  Centraly(ex)]
-def Div(ex:List[FieldEx]) -> Field: return Centralx(ex[0]) + Centraly(ex[1])
-def Lap(ex:FieldEx) -> Field:       return Central2x(ex) + Central2y(ex)
-
-def Div_vels_to_cell(ex:Vels) -> Cell:
+def div_vels_to_cell(ex:Vels) -> Cell:
     div = 0 
     div += np.diff(ex[0], n=1, axis=0)/dx
     div += np.diff(ex[1], n=1, axis=1)/dy 
     return div
     
-def Grad_cell_to_vels(ex:CellEx) -> Vels:
+def grad_cell_to_vels(ex:CellEx) -> Vels:
     grad = [None, None]
     grad[0] = np.diff(ex[:,1:-1], n=1, axis=0)/dx
     grad[1] = np.diff(ex[1:-1,:], n=1, axis=1)/dy 
     return grad
     
-def _FluxLimitx(u, un, dd, un_face=None, f=None, limiter="vanalbada", sweby_beta=1.3):
-    assert u.shape == un.shape
+def _flux_limitx(dd, q, u, f=None, u_face=None, limiter="vanalbada", sweby_beta=1.3):
+    qc = q[:, 1:-1]
     uc = u[:, 1:-1]
-    unc = un[:, 1:-1]
 
-    if f is None: 
-        f = 1.0
-    if un_face is None:
-        un_face = 0.5 * (unc[:-1, :] + unc[1:, :])
+    if u_face is None: u_face = 0.5 * (uc[:-1, :] + uc[1:, :])
+    if f is None: f = 1.0
+
+    assert q.shape == u.shape
+    assert u_face.shape[0] == u.shape[0] - 1
+    assert u_face.shape[1] == u.shape[1] - 2
 
     # Van Leer limiter on interior cells only
-    du_b = unc[1:-1, :] - unc[:-2, :]
-    du_f = unc[2:, :] - unc[1:-1, :]
+    du_b = uc[1:-1, :] - uc[:-2, :]
+    du_f = uc[2:, :] - uc[1:-1, :]
 
     with np.errstate(divide="ignore", invalid="ignore"):
         r = np.nan_to_num(du_b/du_f, posinf=1e15, neginf=-1e15, nan=0.0, copy=False)
@@ -479,7 +396,7 @@ def _FluxLimitx(u, un, dd, un_face=None, f=None, limiter="vanalbada", sweby_beta
         ar = np.abs(r)
         phi = (r + ar) / (1.0 + ar)
     elif limiter == "vanalbada":
-        phi = (r * r + r) / (r * r + 1.0)
+        phi = (r*r + r) / (r*r + 1.0)
     elif limiter == "minmod":
         phi = np.maximum(0.0, np.minimum(1.0, r))
     elif limiter == "superbee":
@@ -501,8 +418,7 @@ def _FluxLimitx(u, un, dd, un_face=None, f=None, limiter="vanalbada", sweby_beta
         )
     elif limiter == "mc":
         phi = np.maximum(
-            0, np.minimum.reduce(
-                [0.5*(1+r), 2*np.ones_like(r),2*r])
+            0, np.minimum.reduce([0.5*(1+r), 2*np.ones_like(r),2*r])
         )
         
     else:
@@ -511,30 +427,30 @@ def _FluxLimitx(u, un, dd, un_face=None, f=None, limiter="vanalbada", sweby_beta
 
     # Pad the slope with zeros. This has the effect of
     # falling back onto first-order upwind in the missing cells! 
-    slope = np.zeros_like(uc)
-    slope[1:-1, :] = phi*(uc[1:-1, :] - uc[:-2, :])
+    slope = np.zeros_like(qc)
+    slope[1:-1, :] = phi*(qc[1:-1, :] - qc[:-2, :])
 
-    uL = uc[:-1, :] + 0.5 * slope[:-1, :]
-    uR = uc[1:,  :] - 0.5 * slope[1:,  :]
+    qL = qc[:-1, :] + 0.5 * slope[:-1, :]
+    qR = qc[1:,  :] - 0.5 * slope[1:,  :]
 
-    u_up = np.where(un_face >= 0.0, uL, uR)
-    F = u_up * (f / dd)
+    q_up = np.where(u_face >= 0.0, qL, qR)
+    F = q_up * (f / dd)
     return F[1:, :] - F[:-1, :]
 
-def FluxLimitx(u, un, un_face=None, f=None, limiter="vanalbada", sweby_beta=1.3) -> Velx:
-    return _FluxLimitx(u, un, dx, un_face=un_face, f=f)
+def flux_limitx(q, u, f=None, u_face=None, limiter="vanalbada", sweby_beta=1.3) -> Velx:
+    return _flux_limitx(dx, q, u, u_face=u_face, f=f, limiter=limiter, sweby_beta=sweby_beta)
     
-def FluxLimity(u, un, un_face=None, f=None, limiter="vanalbada", sweby_beta=1.3) -> Vely:
-    ft = f.T if f is not None else None
-    un_facet = un_face.T if un_face is not None else None
-    return _FluxLimitx(u.T, un.T, dy, un_face=un_facet, f=ft).T
+def flux_limity(q, u, f=None, u_face=None, limiter="vanalbada", sweby_beta=1.3) -> Vely:
+    fT = f.T if f is not None else None
+    u_faceT = u_face.T if u_face is not None else None
+    return _flux_limitx(dy, q.T, u.T, u_face=u_faceT, f=fT, limiter=limiter, sweby_beta=sweby_beta).T
 
-Interp_vels_swap  = (Interp_velx_to_vely,  Interp_vely_to_velx)
-Interp_vels_to_cell = (Interp_vels_to_cellx, Interp_vels_to_celly)
-Central = (Centralx,  Centraly)
-Central2 = (Central2x, Central2y)
-Upwind = (Upwindx, Upwindy)
-FluxLimit = (FluxLimitx, FluxLimity)
+interp_vels_swap  = (interp_velx_to_vely,  interp_vely_to_velx)
+interp_vels_to_cell = (interp_vels_to_cellx, interp_vels_to_celly)
+central = (centralx,  centraly)
+central2 = (central2x, central2y)
+upwind = (upwindx, upwindy)
+flux_limit = (flux_limitx, flux_limity)
 
 LimiterType = Literal[
     "central",
@@ -547,7 +463,7 @@ LimiterType = Literal[
     "sweby",
     "mc",
 ]
-AdvectionVariant = Literal["div", "advect", "skew"]
+AdvectionVariant = Literal["advect", "div", "skew", "non-conservative"]
 
 @dataclass
 class AdvectParams:
@@ -555,41 +471,57 @@ class AdvectParams:
     # see "Fully Conservative Higher Order Finite Difference Schemes for Incompressible Flow" by
     # "Y. Morinishi,1 T. S. Lund, O. V. Vasilyev, and P. Moin" 1998
     variant : AdvectionVariant = "advect" 
-    blend_factor = 0.0 #Applies only when limiter is blend. 0 only upwind to 1 only central difference
-    sweby_beta = 1.5 #Applies only when limiter is sweby
+    blend_factor : float = 0.0 #Applies only when limiter is blend. 0 only upwind to 1 only central difference
+    sweby_beta : float = 1.5 #Applies only when limiter is sweby
 
-def Advectxy(axis, u:np.ndarray, un:np.ndarray, dirf:np.ndarray, params:AdvectParams, f=None) -> np.ndarray:
-    def _inner(u:np.ndarray, f):
+# Calculates axis component of the mathematical expression "u*grad(q)" 
+# in few different ways depending on params. Is intended to be used as catch-all advection solution 
+# - q is the advected field (arbitrary)
+# - u is the advecting field (velocity)
+# - u_face are the faces of u. If not provided is calculated from u which might however be worse approximation.
+# this function is linear in q. All nonlinear behaviour is based on u / u_face.
+def advectxy(axis, q:np.ndarray, u:np.ndarray, params:AdvectParams, u_face:np.ndarray=None) -> np.ndarray:
+    def calc_face(field):
+        if axis == 0: return 0.5*(field[1:,1:-1] + field[:-1,1:-1])
+        if axis == 1: return 0.5*(field[1:-1,1:] + field[1:-1,:-1])
+    
+    if u_face is None: u_face = calc_face(u)
+    
+    # f here and in all other functions (upwind, central) is either u_face or nothing
+    def _advect_limiter(q:np.ndarray, f=None):
         if params.limiter in ["vanleer", "vanalbada", "minmod", "superbee", "sweby", "mc"]:
-            return FluxLimit[axis](u, un, un_face=dirf, f=f, limiter=params.limiter, sweby_beta=params.sweby_beta)
+            return flux_limit[axis](q, u, u_face=u_face, f=f, limiter=params.limiter, sweby_beta=params.sweby_beta)
         elif params.limiter == "central":
-            return Central[axis](u, f=f)
+            return central[axis](q, f=f)
         elif params.limiter == "upwind":
-            return Upwind[axis](u, dirf, f=f)
+            return upwind[axis](q, u_face, f=f)
         elif params.limiter == "blend":
-            upw = Upwind[axis](u, dirf, f=f)
-            cen = Central[axis](u, f=f)
+            upw = upwind[axis](q, u_face, f=f)
+            cen = central[axis](q, f=f)
             return upw + params.blend_factor*(cen - upw)
         else:
             raise ValueError(f"Unknown flux limiter '{params.limiter}'")
 
     if params.variant == "advect":
-        return _inner(u, f=f)
-    elif params.variant == "div":
-        return _inner(un[1:-1, 1:-1]*u, f=None)
+        return _advect_limiter(q, f=u_face)
+    #TODO: this one only holds with the classic continuity EQ. Make work with the modified one!
+    elif params.variant == "div": 
+        return _advect_limiter(u*q)
     elif params.variant == "skew":
-        div = _inner(un[1:-1, 1:-1]*u, f=None)
-        adv = _inner(u, f=f)
+        div = _advect_limiter(u*q)
+        adv = _advect_limiter(q, f=u_face)
         return 0.5*(div + adv)
+    elif params.variant == "non-conservative":
+        return u[1:-1, 1:-1]*_advect_limiter(q)
     else:
         raise ValueError(f"Unknown advection varaint '{params.variant}'")
     
-def Advectx(u:np.ndarray, un:np.ndarray, dirf:np.ndarray, params:AdvectParams, f=None) -> np.ndarray: 
-    return Advectxy(0, u, un, dirf, params, f)
-def Advecty(u:np.ndarray, un:np.ndarray, dirf:np.ndarray, params:AdvectParams, f=None) -> np.ndarray: 
-    return Advectxy(1, u, un, dirf, params, f)
+def advectx(q:np.ndarray, u:np.ndarray, params:AdvectParams, u_face=None) -> np.ndarray: 
+    return advectxy(0, q, u, params, u_face=u_face)
+def advecty(q:np.ndarray, u:np.ndarray, params:AdvectParams, u_face=None) -> np.ndarray: 
+    return advectxy(1, q, u, params, u_face=u_face)
 
-Advect = (Advectx, Advecty)
+advect = (advectx, advecty)
 
 # DIRECT MATRIX ASSEMBLY 
 def mat_rows(shape, ce=0, px=0, mx=0, py=0, my=0, offset=0):
@@ -642,12 +574,12 @@ def mat_upwindx(shape, dir, f=None):
     # else:  (ui+1 - ui) * fi+1/2 / dx (f[1:])
     if f is None: f = 1
     fdx = f / dx
-    if isinstance(f, (float, int)):
-        fp = fdx 
-        fm = fdx
-    else:
+    if isinstance(f, np.ndarray):
         fp = fdx[1:, :]
         fm = fdx[:-1, :]
+    else:
+        fp = fdx 
+        fm = fdx
 
     mask = dir >= 0
     mx = np.where(mask, -fm, 0.0)
@@ -658,12 +590,12 @@ def mat_upwindx(shape, dir, f=None):
 def mat_upwindy(shape, dir, f=None):
     if f is None: f = 1
     fdy = f / dy
-    if isinstance(f, (float, int)):
-        fp = fdy
-        fm = fdy
-    else:
+    if isinstance(f, np.ndarray):
         fp = fdy[:, 1:]
         fm = fdy[:, :-1]
+    else:
+        fp = fdy
+        fm = fdy
 
     mask = dir >= 0
     my = np.where(mask, -fm, 0.0)
@@ -671,6 +603,7 @@ def mat_upwindy(shape, dir, f=None):
     py = np.where(mask, 0.0, fp)
     return mat_cols(shape, ce=ce, py=py, my=my)
 
+# Advection, for now limited to blend... 
 def mat_advectx(shape, dir, params:AdvectParams, f:np.ndarray=None) -> np.ndarray:
     upw = mat_upwindx(shape, dir, f)
     cen = mat_centralx(shape, f)
@@ -685,6 +618,13 @@ mat_central = (mat_centralx, mat_centraly)
 mat_upwind = (mat_upwindx, mat_upwindy)
 mat_advect = (mat_advectx, mat_advecty)
 
+# "Pins" the stencil at particular xs, ys to the perscribed value.
+# This has two modes: 
+# direct = True: which causes mat_stencil_apply(stencils, .)[xs, ys] == value
+# direct = False: which causes the solution of this stencil to have the value:
+#    A,b = mat_stencil_to_dia(stencils)
+#    Ax = -b #solve for x
+#    x[xs, ys] = value
 def mat_pin(stencils: np.ndarray, xs, ys, value, direct=False):
     stencils[xs, ys, :] = 0
     if direct:
@@ -816,126 +756,155 @@ def ilu_preconditioner(A, drop_tol=1e-4, fill_factor=10):
     M = sp.sparse.linalg.LinearOperator(A.shape, matvec=ilu.solve)
     return M
 
+def dot(a, b):
+    out = 0
+    for (ae, be) in zip(a, b):
+        out += ae*be
+    return out
+
+def phase_project(x:np.ndarray, phase:np.ndarray, cutoff, fill = 0, copy=True):
+    if copy: x = x.copy()
+    if cutoff > -np.inf:
+        x = np.where(phase > cutoff, x, fill)
+    return x
+
+def freeze(xs):
+    if isinstance(xs, (list, tuple)):
+        for x in xs:
+            freeze(x)
+    elif isinstance(xs, np.ndarray):
+        xs.flags.writeable = False
+    return xs
+
+#TODO: move more stuff into params, less as globals (just model params. Impl params will be arguments)
 step_total_time_sum = 0
 step_pred_time_sum = 0
 step_corr_time_sum = 0
 
-cutoff_u = -np.inf
-cutoff_p = -np.inf
-cutoff_u_post = -np.inf
-cutoff_p_post = -np.inf
-cutoff_u_corr = -np.inf
 M = None
 
-import time
+# Exact:      
+#   φdu/dt = -φ(u*grad)u + nu*div(φgrad(u)) - φgrad(p)/rho + φS + BCu
+# 
+# Where: 
+#   BCu = -beta/eps^2(1 - φ)(u - g)  //no slip, g is velocity of boundary, so g = 0
+#   div(φgrad(u)) = φlap(u) + grad(u)*grad(φ)
+#   φgrad(p) = grad(φp) - pgrad(φ)  //section 3.1 of [2]
+# 
+# So:
+#   φdu/dt = -φu*div(u) 
+#            + nu*(φlap(u) + grad(u)*grad(φ)) 
+#            - (grad(φp) - pgrad(φ))/rho + φS 
+#            - beta/eps^2(1 - φ)(u - g) 
+# 
+# source: 
+#  [1] https://tu-dresden.de/mn/math/wir/ressourcen/dateien/forschung/publikationen/pdf2009/solving_pdes_in_complex_geometries.pdf?lang=en
+#  [2] https://tu-dresden.de/mn/math/wir/ressourcen/dateien/forschung/publikationen/pdf2010/two_phase_flow.pdf?lang=en
+# 
+# Projection method: 
+#   u -  u      current time step veloctiy
+#   p -  p      current time step pressure
+#   pp - p-pred predicted next time step pressure (may be p)
+#   um - u-next next time step velocity, 
+#   pm - p-next next time step pressure, 
+#   us - u-star momentum predictor
+#   dp -  p-incr pressure increment from predicted (pm = pp + dp)
+#   NP(v) - non-pressure part of the NS eq. evaluated 
+#           using velocity v (i ommit v below)
+#   
+#   Assume from Helmholtz decomposition that: 
+#       us = um + grad(psi)
+#   since div(um) = 0 (incompressibility) and us is fully general field.
+#   Thus grad(psi) is the error between us and um.
+# 
+#   Our equation reads:
+#       du/dt = -(u*grad)u + nu*div(grad(u)) + S - grad(p)
+#                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#                   NP (non pressure terms)    
+#       du/dt = NP - grad(p)  
+# 
+#   We discretize using crank-nicolson with cofficient a=0.5 so we get           
+#       (um - u)/dt = a[NP - grad(pm)] + (1-a)[NP - grad(p)]
+#       um = u + dt*NP - a*dt*grad(pm = pp+dp) - (1-a)*dt*grad(p) 
+#       
+#   But we can calculate the RHS only using our best guess for pressure pp 
+#   thus we drop the dp and get:
+#       us = u + dt*NP - a*dt*grad(pp) - (1-a)*dt*grad(p) 
+#   and can write
+#       us = um + a*dt*grad(dp)
+#   and along with the Helmholtz decompositon
+#       us = um + grad(psi)
+#   we see that psi = a*dt*dp = a*dt*(pm - pp). Thus the increments are
+#       pm = pp + dp
+#       um = us - a*dt*grad(dp)
+#  
+#   Aapplying div on the increment we have
+#       div(us) = a*dt*lap(dp)
+#   which yields the poisson eq.
+#       lap(dp) = div(us)/(dt*a)
+# 
+#   Remarks:
+#    - technically this only works when NP terms are equal.
+#      This happens for explicit schemes where NP in both eqs is NP(u). 
+#      In implicit schemes its NP(us) vs NP(um). We choose to ignore this.
+#    - we get non-incremental by simply assuming p=0 thus pm=dp
+#    - to add rho into the procedure replace p with p/rho and dp with dp/rho
+#
+#   Now we redo the procedure on our diffuse domain formulation:
+#      φdu/dt = φNP(u) - φgrad(p)
+#      div(φu) = g*grad(φ)
+#   with
+#      NP(v) = -u*div(v) + nu*lap(v) + nu*grad(v)*grad(φ)/φ + BC(v)/φ + S
+# 
+#   applying the same procdeure as above we get the same result 
+#   (obviously, since we could remove φ from both sides in which case 
+#    the only term that changed is NP which is not present)
+#       φus = φum + a*dt*φgrad(dp)
+#   Now as long as φ != 0 and grad(φ) = 0 we can divide both sides by it and 
+#   retrieve the same possion EQ as above in the classic formulation, 
+#   verifiing it matches Helmholtz decomposition
+#       us = um + a*dt*grad(dp)
+#       us = um + grad(psi).
+# 
+#   This shows that in the liquid domain nothing changed and classic continuity holds. 
+#   In the solid phase or on the boundary we cannot do this so we work with the modified
+#   equation and after applying div() get  
+#       a*dt*(div(φgrad(dp))) = div(φus) - div(φum) = div(φus) - g*grad(φ)
+#   where we used the modified continiuty condition. 
+#       
 def step_phase(
     fields:dict, low_bounds:dict,
-    advect_params:AdvectParams, 
-    advect_tang_params:AdvectParams | None = None, 
-    step=0,
-    proj_phase_corrector=False,
-    proj_variant="increment",
-    proj_nonlinear=False,
-    proj_iters=1) -> dict:
-
-    # Exact:      
-    #   φdu/dt = -φ(u*grad)u + nu*div(φgrad(u)) - φgrad(p)/rho + φS + BCu
-    # 
-    # Where: 
-    #   BCu = -beta/eps^2(1 - φ)(u - g)  //no slip, g is velocity of boundary, so g = 0
-    #   div(φgrad(u)) = φlap(u) + grad(u)*grad(φ)
-    #   φgrad(p) = grad(φp) - pgrad(φ)  //section 3.1 of [2]
-    # 
-    # So:
-    #   φdu/dt = -φu*div(u) 
-    #            + nu*(φlap(u) + grad(u)*grad(φ)) 
-    #            - (grad(φp) - pgrad(φ))/rho + φS 
-    #            - beta/eps^2(1 - φ)(u - g) 
-    #  
-    #   du/dt  = -(u*grad)u 
-    #            + nu*lap(u) + nu*grad(u)*grad(φ)/φ 
-    #            - (grad(φp) - pgrad(φ))/φrho + S 
-    #            - beta/eps^2(1 - φ)(u - g)/φ
-    # 
-    # source: 
-    #  [1] https://tu-dresden.de/mn/math/wir/ressourcen/dateien/forschung/publikationen/pdf2009/solving_pdes_in_complex_geometries.pdf?lang=en
-    #  [2] https://tu-dresden.de/mn/math/wir/ressourcen/dateien/forschung/publikationen/pdf2010/two_phase_flow.pdf?lang=en
-    # 
-    # Projection method: 
-    #   u -  u      current time step veloctiy
-    #   p -  p      current time step pressure
-    #   un - u-next next time step velocity, 
-    #   pn - p-next next time step pressure, 
-    #   us - u-star momentum predictor
-    #   q -  p-incr pressure increment (qn = p + q)
-    #   NP(v) - non-pressure part of the NS eq. evaluated 
-    #           using velocity v (i ommit v below)
-    #   
-    #   Assume from Helmholtz decomposition that: 
-    #       us = un + grad(psi)
-    #   since div(un) = 0 (incompressibility) and us is fully general field.
-    #   Thus grad(psi) is the error between us and un.
-    # 
-    #   This gives
-    #       (un - u)/dt = NP - grad(pn) 
-    #       un = u + dt*NP - dt*grad(p) - dt*grad(q) 
-    #       
-    #   But we calculate new velocity using opperator splitting using the 
-    #   old pressure p, so we get:
-    #       (us - u)/dt = NP - grad(p)
-    #       us = u + dt*NP - dt*grad(p)
-    #   thus and along with the Helmholtz decompositon
-    #       us = un + dt*grad(q)
-    #       us = un + grad(psi)
-    #   we see that psi = dt*q = dt*(pn - p). Thus the increments are
-    #       pn = p + q
-    #       un = us - dt*grad(q)
-    #  
-    #   Aapplying div on the Helmholtz decompositon we get 
-    #       div(us) = div(un) + div(grad(psi)) 
-    #       div(us) = lap(psi) = dt*lap(q)
-    #   which yields the poisson eq.
-    #       lap(q) = div(us)/dt
-    # 
-    #   Remarks:
-    #    - technically this only works when NP terms are equal.
-    #      This happens for explicit schemes where NP in both eqs is NP(u). 
-    #      In implicit schemes its NP(us) vs NP(un). We choose to ignore this.
-    #    - we get non-incremental by simply assuming p=0 thus pn=q
-    #    - to add rho into the procedure replace p with p/rho and q with q/rho
-    #   
-    #   φdu/dt = duφ/dt - u*dφ/dt
-    # 
-    #   Now we redo the procedure on our diffuse domain formulation:
-    #      φdu/dt = φNP(u) + φgrad(p) + φS
-    #      div(φu) = g*grad(φ)
-    #   with
-    #      NP(v) = -u*div(v) + nu*lap(v) + nu*grad(v)*grad(φ)/φ + BC(v)/φ
-    # 
-    #   applying the same procdeure as above we get the same result 
-    #   (obviously, since we could remove φ from both sides in which case 
-    #    the only term that changed is NP which is not present)
-    #       φus = φun + dt*φgrad(q)
-    #   Now as long as φ != 0 and grad(φ) = 0 we can divide both sides by it and 
-    #   retrieve the same possion EQ as above in the classic formulation, 
-    #   verifiing it matches Helmholtz decomposition
-    #       us = un + dt*grad(q)
-    #       us = un + grad(psi).
-    # 
-    #   This proves that in the liquid domain nothing changed and classic continuity holds. 
-    #   In the solid phase or on the boundary we cannot do this so we work with the modified
-    #   equation and after applying div() get  
-    #       dt*(div(φgrad(q))) = div(φus) - div(φun) = div(φus) - g*grad(φ)
-    #   where we used the modified continiuty condition. 
-    #
+    advect_params:AdvectParams | None = None, 
+    past_fields : List[dict] | None = None,
+    proj_time_stepping_coefficient = 0.5,
     
-    advect_norm_params = advect_params
-    if advect_tang_params is None:
-        advect_tang_params = advect_params
+    proj_phase_corrector = True,
+    proj_variant = "increment",
+    proj_outer_iters = 1,
 
+    proj_pred_maxiter = 50,
+    proj_corr_maxiter = 1000,
+    
+    proj_phase_cutoff = 0.05,
+
+    proj_preconditioner_every = 30,
+    proj_preconditioner_fill_factor = 35,
+
+    proj_nonlinear_predictor = False,
+    proj_extrapolate_u = 1, 
+    proj_extrapolate_p = 1, 
+    
+    step = 0) -> dict:
+
+    if advect_params is None:
+        advect_params = AdvectParams()
+
+    # Perf info 
     time_start = time.time_ns()
     time_pred = 0
     time_corr = 0
+    time_pred_solve = 0
+    time_corr_solve = 0
     pred_iters = 0
     corr_iters = 0 
 
@@ -943,24 +912,21 @@ def step_phase(
     BCp = low_bounds['p']
     BCphi = low_bounds['f']
 
-    uxn:Velx = fields['u'] 
-    uyn:Vely = fields['v'] 
-    pn:Cell  = fields['p'] 
-    phi:Cell = fields['f']
+    uxn:Velx = freeze(fields['u']) 
+    uyn:Vely = freeze(fields['v']) 
+    pn:Cell  = freeze(fields['p'])
+    phi:Cell = freeze(fields['f'])
 
-    un = bc_apply_vels([uxn, uyn], BCu)
-    
-    unk = un #todo guess for better accuracy of advection!
-    pnk = pn #todo guess for better accuracy of predictor!
+    un = freeze(bc_apply_vels([uxn, uyn], BCu))
 
-    # Prepare phase vals ======================
+    # Prepare phase ======================
     phim = phi + phi_delta
     ex_phi = bc_expand_cell(phim, BCphi)
 
-    grad_phi_cells = Grad(ex_phi)
-    grad_phi = Grad_cell_to_vels(ex_phi)
+    grad_phi_cells = grad(ex_phi)
+    grad_phi = grad_cell_to_vels(ex_phi)
 
-    vel_phi = Interp_cell_to_vels(ex_phi)
+    vel_phi = interp_cell_to_vels(ex_phi)
     vel_phi_corner = 1/4*(
         ex_phi[1:,1:] + ex_phi[:-1,1:] +
         ex_phi[1:,:-1] + ex_phi[:-1,:-1]
@@ -975,196 +941,253 @@ def step_phase(
         [vel_phi_corner, ex_phi[1:-1,:]]
     ]
     # TODO: phi_vel_face can be tighteneded I think
-    #    o---V---o---V---o---V---o
-    #    |       |       |       |
-    #    >   O   >   O   >   O   >
-    #    |       |       |       |
-    #    o---V---X---V---X---V---o
-    #    |       |       |       |
-    #    >   O   >   O   >   O   > 
-    #    |       |       |       |
-    #    o---V---X---V---X---V---o
-    #    |       |       |       |
-    #    >   O   >   O   >   O   >
-    #    |       |       |       |
-    #    o---V---o---V---o---V---o
 
     # Prepare wall velocity and source terms ======================
     wallu = [0, 0]
     vel_wallu = [[0, 0], [0, 0]]
-    if wallu_ := fields.get('wallu'):
-        wallu = wallu_
-        vel_wallu[0] = Interp_cell_to_vels(bc_expand_cell(wallu[0], BCphi))
-        vel_wallu[1] = Interp_cell_to_vels(bc_expand_cell(wallu[1], BCphi))
+    if w := fields.get('wallu'):
+        wallu = w
+        vel_wallu[0] = interp_cell_to_vels(bc_expand_cell(wallu[0], BCphi))
+        vel_wallu[1] = interp_cell_to_vels(bc_expand_cell(wallu[1], BCphi))
 
     source = [0, 0]
     vel_source = [[0, 0], [0, 0]]
-    if source_ := fields.get('source'):
-        source = source_
-        vel_source[0] = Interp_cell_to_vels(bc_expand_cell(source[0], BCphi))
-        vel_source[1] = Interp_cell_to_vels(bc_expand_cell(source[1], BCphi))
+    if s := fields.get('source'):
+        source = s
+        vel_source[0] = interp_cell_to_vels(bc_expand_cell(source[0], BCphi))
+        vel_source[1] = interp_cell_to_vels(bc_expand_cell(source[1], BCphi))
 
-    # It doesnt make sense to do iterations on non-incremental scheme
-    if proj_variant == "non-increment":
-        proj_iters = 1
+    # extrapolate previous solutions. This is used as initial guess for matrix solve
+    # and depending on other settings during non-linear advection causing for faster 
+    # convergence across outer iterations
+    um_extrapolated = list(un)
+    pm_extrapolated = pn
+    if past_fields:
+        def extrapolate(order, field):
+            if order >= 2 and len(past_fields) >= 3:
+                return 3*past_fields[0][field] - 3*past_fields[1][field] + past_fields[2][field]
+            elif order >= 1 and len(past_fields) >= 2:
+                return 2*past_fields[0][field] - past_fields[1][field]
+            else:
+                return past_fields[0][field]
 
-    def dot(a, b):
-        out = 0
-        for (ae, be) in zip(a, b):
-            out += ae*be
-        return out
+        um_extrapolated[0] = extrapolate(proj_extrapolate_u, "u")
+        um_extrapolated[1] = extrapolate(proj_extrapolate_u, "v")
+        pm_extrapolated    = extrapolate(proj_extrapolate_p, "p")
 
-    def phase_project(x:np.ndarray, phase:np.ndarray, cutoff, fill = 0, copy=True):
-        if copy: x = x.copy()
-        if cutoff > -np.inf:
-            x = np.where(phase > cutoff, x, fill)
-        return x
+    freeze(um_extrapolated)
+    freeze(pm_extrapolated)
 
-    #PREDICTOR ============================
-    p_corr_last = None
-    for k in range(proj_iters):
-        ex_unknorm = bc_expand_vels(unk if proj_nonlinear else un, BCu)
-        ex_unktang = [ 
-            bc_expand_vely(Interp_velx_to_vely(ex_unknorm[0]), BCu[1]),
-            bc_expand_velx(Interp_vely_to_velx(ex_unknorm[1]), BCu[0]),
-        ]
+    dp_last = None
+    umk = None
+    pmk = None
+    for k in range(proj_outer_iters):
+        # Below is implemented the crank-nicolson method for time integration.
+        # It starts from the semidiscrete scheme of our differential equation
+        #   du/dt = F[t](u)
+        # where F[t](u) is already spatially discretized function of u 
+        # (and its spacial derivatives) evaluated on the time level t. 
+        # 
+        # Now we discretize in time. Couple of common discretizations are: 
+        # - Explicit scheme: (um - un)/dt = F[n]
+        # - Implicit scheme: (um - un)/dt = F[m]
+        # - Crank-Nicolson:  (um - un)/dt = aF[m] + (1 - a)*F[n]
+        # where typically a=0.5. If a=1 then is implicit. If a=0 then is explicit.
+        # 
+        # For ease of implementation we split F[t](u) into
+        # F[t](u) = LIN[t](u) + FLAT[t]
+        # where LIN[t](u) are all the terms of F[t](u) that involve u and FLAT[t] the rest.
+        # 
+        # Expanding Crank-Nicolson we get:
+        # (um - un)/dt = a*(LIN[m] + FLAT[m]) + (1-a)*(LIN[n] + FLAT[n])
+        # um - dt*a*LIN[m] = un + dt*((1-a)*LIN[n] + (1-a)*FLAT[n] + a*FLAT[m])
+        # ^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        #    pred_lhs(um)     =     pred_rhs
+        # 
+        # Which is a linear system we can solve.
+        # 
+        # Our equation is (after dividing by φ)
+        #   du/dt = -(u*grad)u + nu*div(φgrad(u))/φ + BC(u)/φ  -grad(p)/rho + S
+        #           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+        # So we have:         LIN[t](u)                           FLAT[t]
+        # 
 
-        cell_unk = [
-            Interp_vels_to_cellx(ex_unknorm[0]),
-            Interp_vels_to_celly(ex_unknorm[1]),
-        ]
-        face_unknorm = [
-            cell_unk[0][:, 1:-1],
-            cell_unk[1][1:-1, :],
-        ]
-        face_unktang = [
-            0.5*(ex_unknorm[0][1:-1, 1:] + ex_unknorm[0][1:-1, :-1]),
-            0.5*(ex_unknorm[1][1:, 1:-1] + ex_unknorm[1][:-1, 1:-1]),
-        ]
+        # This function prepares fields for LIN and FLAT to remove repeated computation
+        def compute_interpolated(u, p) -> tuple:
+            ex_unorm = bc_expand_vels(u, BCu)
+            ex_utang = [ 
+                bc_expand_vely(interp_velx_to_vely(ex_unorm[0]), BCu[1]),
+                bc_expand_velx(interp_vely_to_velx(ex_unorm[1]), BCu[0]),
+            ]
+            cell_u = [
+                interp_vels_to_cellx(ex_unorm[0]),
+                interp_vels_to_celly(ex_unorm[1]),
+            ]
+            face_unorm = [
+                cell_u[0][:, 1:-1],
+                cell_u[1][1:-1, :],
+            ]
+            face_utang = [
+                0.5*(ex_unorm[0][1:-1, 1:] + ex_unorm[0][1:-1, :-1]),
+                0.5*(ex_unorm[1][1:, 1:-1] + ex_unorm[1][:-1, 1:-1]),
+            ]
+            
+            ex_p = bc_expand_cell(p, BCp)
+            grad_p = grad_cell_to_vels(ex_p)
 
-        ex_pnk = bc_expand_cell(pnk, BCp)
-        grad_pnk = Grad_cell_to_vels(ex_pnk)
-  
-        u_pred = [un[0], un[1]]
+            return freeze((ex_unorm, ex_utang, face_unorm, face_utang, grad_p))
+        
+        def LIN(uex:np.ndarray, d:int, t:int, interpolated:tuple) -> np.ndarray:
+            ex_unorm, ex_utang, face_unorm, face_utang, grad_p = interpolated
+            advnorm = advect[d](uex, u=ex_unorm[d], u_face=face_unorm[d], params=advect_params)
+            advtang = advect[t](uex, u=ex_utang[t], u_face=face_utang[t], params=advect_params)
+            adv = (advnorm + advtang)
+
+            dif = nu*div_grad(phi_vel_face[d], uex)/vel_phi[d]
+            BC = -beta/(phi_eps**2) * (1 - vel_phi[d])*(uex[1:-1, 1:-1] - vel_wallu[d][d])/vel_phi[d]
+            
+            return -adv + dif + BC
+
+        def FLAT(d:int, t:int, interpolated:tuple) -> np.ndarray:
+            ex_unorm, ex_utang, face_unorm, face_utang, grad_p = interpolated
+            out = vel_source[d][d]
+            if proj_variant != "non-increment": 
+                out -= 1/rho*grad_p[d]
+            return out
+
+        #PREDICTOR ============================
+        time_pred_start = time.time_ns()
+
+        # Predicted variables are used to represent 
+        # next time time level in predictor solve
+        if k == 0:
+            um_predicted = um_extrapolated if proj_nonlinear_predictor else un
+            pm_predicted = pm_extrapolated
+        else:
+            um_predicted = umk
+            pm_predicted = pmk
+        
+        # initial guess for solution. 
+        # This can be arbitrary but can speed up iteration
+        um_guess = um_extrapolated if k == 0 else umk
+
+        a = min(max(proj_time_stepping_coefficient, 0), 1)
+        interp_n = compute_interpolated(un, pn)                     if a < 1 else None
+        interp_m = compute_interpolated(um_predicted, pm_predicted) if a > 0 else None
+
+        us = list(um_predicted)
         for d in range(2):
             t = 1-d
-
             def pred_lhs(u:np.ndarray) -> np.ndarray:
                 nonlocal pred_iters 
                 pred_iters += 1
-
                 uex = bc_expand_vel[d](u, BCu[d])
-                advnorm = Advect[d](uex, un=ex_unknorm[d], dirf=face_unknorm[d], f=face_unknorm[d], params=advect_norm_params)
-                advtang = Advect[t](uex, un=ex_unktang[t], dirf=face_unktang[t], f=face_unktang[t], params=advect_tang_params)
-                adv = (advnorm + advtang)
-
-                dif = nu*DivGrad(phi_vel_face[d], uex)/vel_phi[d]
-                BC = -beta/(phi_eps**2) * (1 - vel_phi[d])*(u - vel_wallu[d][d])/vel_phi[d]
-
-                lhs = u + dt*(adv - dif - BC)
-                lhs = bc_apply_vel[d](lhs, BCu[d], copy=False)
-                lhs = phase_project(lhs, vel_phi[d], cutoff_u, copy=False)
-                return lhs
+                out = u - dt*a*LIN(uex, d, t, interp_m)
+                out = bc_apply_vel[d](out, BCu[d], copy=False)
+                out = phase_project(out, vel_phi[d], proj_phase_cutoff, copy=False)
+                return out
                 
-            pred_rhs = un[d] + dt*vel_source[d][d]
-            if proj_variant != "non-increment": 
-                pred_rhs -= dt/rho*grad_pnk[d]
+            pred_rhs = un[d].copy()
+            if a > 0: pred_rhs += dt*a*FLAT(d, t, interp_m) 
+            if a < 1: pred_rhs += dt*(1-a)*(LIN(interp_n[0][d], d, t, interp_n) + FLAT(d, t, interp_n))
+            pred_rhs = bc_apply_vel[d](pred_rhs, BCu[d], copy=False)
+            pred_rhs = phase_project(pred_rhs, vel_phi[d], proj_phase_cutoff, copy=False)
 
-            pred_rhs = phase_project(pred_rhs, vel_phi[d], cutoff_u, copy=False)
-            pred_maxiter = max(300, 3 * pred_rhs.size)
+            time_pred_solve_start = time.time_ns()
+            if a > 0: us[d], pred_iters_ret = matrix_free_solve(pred_lhs, pred_rhs, x0=um_guess[d], maxiter=proj_pred_maxiter)
+            else:     us[d], pred_iters_ret = pred_rhs, 0
+            time_pred_solve += time.time_ns() - time_pred_solve_start
 
-            time_pred_start = time.time_ns()
-            u_pred[d], pred_iters_ret = matrix_free_solve(pred_lhs, pred_rhs, x0=unk[d], maxiter=pred_maxiter)
-            time_pred += time.time_ns() - time_pred_start
+            if pred_iters_ret < 0: print(f"Predictor breakdown at step {step}"); return {}
+            if pred_iters_ret > 0: print(f"Predictor slow convergence ({pred_iters} iters) at step {step}")
 
-        u_pred[0] = phase_project(u_pred[0], vel_phi[0], cutoff_u, fill=vel_wallu[0][0], copy=False)    
-        u_pred[1] = phase_project(u_pred[1], vel_phi[1], cutoff_u, fill=vel_wallu[0][1], copy=False)    
-        u_pred = bc_apply_vels(u_pred, BCu, copy=False) 
-
-        div_u_pred = Div_vels_to_cell(u_pred)
+        us[0] = phase_project(us[0], vel_phi[0], proj_phase_cutoff, copy=False)    
+        us[1] = phase_project(us[1], vel_phi[1], proj_phase_cutoff, copy=False)    
+        us = bc_apply_vels(us, BCu, copy=False) 
+        freeze(us)
+        time_pred += time.time_ns() - time_pred_start
 
         #CORRECTOR ============================
-        if p_corr_last is None:
-            if   proj_variant == "non-increment":    p_corr_last = pnk
-            elif proj_variant == "increment":        p_corr_last = np.zeros_like(pnk)
-            elif proj_variant == "increment-rot":    p_corr_last = nu*div_u_pred
- 
-        corr_maxiter = max(300, 3 * div_u_pred.size)
+        div_us = freeze(div_vels_to_cell(us))
         time_corr_start = time.time_ns()
-
-        #  dt*(div(grad(q))) = div(φus)
-        if proj_phase_corrector == False:
-            def corr_lhs(q):
-                nonlocal corr_iters
-                corr_iters += 1
-                return Lap(bc_expand_cell(q, BCp))
-                
-            corr_rhs = rho/dt*div_u_pred
-            p_corr, corr_iters_ret = matrix_free_solve(corr_lhs, corr_rhs, x0=p_corr_last, maxiter=corr_maxiter)
-        #  dt*(div(φgrad(q))) = div(φus) - g*grad(φ)
+        if dp_last is None:
+            if   proj_variant == "non-increment":    dp_guess = pm_predicted
+            elif proj_variant == "increment":        dp_guess = np.zeros_like(pm_predicted)
+            elif proj_variant == "increment-rot":    dp_guess = nu*div_us
         else:
-            div_phi_us = Div_vels_to_cell([vel_phi[0]*u_pred[0], vel_phi[1]*u_pred[1]])
-            corr_rhs = rho/dt*(div_phi_us - dot(wallu, grad_phi_cells))
+            dp_guess = dp_last
+ 
+        freeze(dp_guess)
+
+        div_phi_us = div_vels_to_cell([vel_phi[0]*us[0], vel_phi[1]*us[1]])
+
+        # a*dt*[div(φgrad(dp))] = div(φus) - g*grad(φ)
+        if proj_phase_corrector:
+            corr_rhs = rho/(a*dt)*(div_phi_us - dot(wallu, grad_phi_cells))
             corr_eq = mat_div_grad((nx, ny), vel_phi)
-            corr_eq = mat_apply_cell_bcs(corr_eq, BCp)
+        # a*dt*[div(grad(dp))] = div(us)
+        else:
+            corr_rhs = rho/(a*dt)*(div_us)
+            corr_eq = mat_lap((nx, ny))
 
-            A, b = mat_stencil_to_dia(corr_eq - mat_off(corr_rhs))
+        corr_eq = mat_apply_cell_bcs(corr_eq, BCp)
+        A, b = mat_stencil_to_dia(corr_eq - mat_off(corr_rhs))
+    
+        global M
+        if M is None or step % proj_preconditioner_every == 0 and k == 0:
+            M = ilu_preconditioner(A, fill_factor=proj_preconditioner_fill_factor)
+        dp, corr_iters_info = sp.sparse.linalg.bicgstab(A, -b, M=M, x0=dp_guess.ravel(), rtol=1e-5, atol=0, maxiter=proj_corr_maxiter)
+        dp = dp.reshape((nx, ny))
+        freeze(dp)
 
-            global M
-            if M is None or step % 30 == 0:
-                M = ilu_preconditioner(A, fill_factor=35)
-            p_corr, corr_iters_ret = sp.sparse.linalg.bicgstab(A, -b, M=M, x0=p_corr_last.ravel(), rtol=1e-5, atol=0, maxiter=corr_maxiter)
-            p_corr = p_corr.reshape((nx, ny))
-            p_corr = phase_project(p_corr, phi, cutoff_p, copy=False)
+        dp_last = dp
+        if corr_iters_info < 0: print(f"Corrector breakdown at step {step}"); return {"pred": us}
+        if corr_iters_info > 0: print(f"Corrector slow convergence ({corr_iters} iters) at step {step}")
 
-        p_corr_last = p_corr
-        if corr_iters_ret < 0:
-            print(f"Corrector breakdown at step {step}")
-            return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred}
-        if corr_iters_ret > 0:
-            print(f"Corrector slow convergence ({corr_iters} iters) at step {step}")
-
+        # def norm(x): return np.sqrt(np.sum(x*x))
+        # print(f"corrector L2:{norm(dp)}: sign:")
         time_corr += time.time_ns() - time_corr_start
         
         #UPDATES ============================
-        grad_p_corr = Grad_cell_to_vels(bc_expand_cell(p_corr, BCp)) 
+        grad_q = grad_cell_to_vels(bc_expand_cell(dp, BCp)) 
+        freeze(grad_q)
 
-        u_next = [None, None]
-        u_next[0] = u_pred[0] - phase_project(dt/rho*grad_p_corr[0], vel_phi[0], cutoff_u_corr, copy=False)
-        u_next[1] = u_pred[1] - phase_project(dt/rho*grad_p_corr[1], vel_phi[1], cutoff_u_corr, copy=False)
+        um = [None, None]
+        um[0] = us[0] - a*dt/rho*grad_q[0]
+        um[1] = us[1] - a*dt/rho*grad_q[1]
+        um = bc_apply_vels(um, BCu, copy=False)
 
-        u_next[0] = phase_project(u_next[0], vel_phi[0], cutoff_u_post, fill=vel_wallu[0][0], copy=False)    
-        u_next[1] = phase_project(u_next[1], vel_phi[1], cutoff_u_post, fill=vel_wallu[0][1], copy=False)   
-        u_next = bc_apply_vels(u_next, BCu, copy=False)
+        if   proj_variant == "non-increment":    pm = dp
+        elif proj_variant == "increment":        pm = pm_predicted + dp
+        elif proj_variant == "increment-rot":    pm = pm_predicted + dp - nu*div_us
 
-        if   proj_variant == "non-increment":    p_next = p_corr
-        elif proj_variant == "increment":        p_next = pn + p_corr
-        elif proj_variant == "increment-rot":    p_next = pn + p_corr - nu*div_u_pred
-        p_next = phase_project(p_next, phi, cutoff_p_post, copy=False)
+        # print(f"lap pred:{norm(lap(pm_predicted))} lap final:{norm(lap(pm))}")
 
-        unk = u_next
-        pnk = p_next
-    
+        umk = freeze(um)
+        pmk = freeze(pm)
+
+    # TODO cleanup. Move all printing to "app"!
     time_whole = time.time_ns() - time_start
-    print(f"time {time_whole//1e6}ms pred {pred_iters}:{int(time_pred/time_whole*100)}% corr {corr_iters}:{int(time_corr/time_whole*100)}%")
+    print(f"time {time_whole//1e6}ms pred {pred_iters}:{int(time_pred/time_whole*100)}% corr {time_corr//1e6}ms:{int(time_corr/time_whole*100)}%")
 
+    # TODO: also move to "app"
     global step_total_time_sum, step_pred_time_sum, step_corr_time_sum
     step_total_time_sum += time_whole
     step_pred_time_sum += time_pred
     step_corr_time_sum += time_corr
 
-    assert un[0].shape == unk[0].shape
-    assert un[1].shape == unk[1].shape
-    assert pn.shape == pnk.shape
-    return {"u": unk[0], "v": unk[1], "p":pnk, "u_pred": u_pred, "p_corr":p_corr, "f":phi}
+    return {"u": umk[0], "v": umk[1], "p":pmk, "pred": us, "dp":dp}
 
 def main():
-    # TODO: Add pnk, unk guessing based on orevious timesteps!
+    # TODO: cleanup naming
+    # TODO: cleanup cutoff. apply cutoff to phase by expanding the velocity cutoff!
     # TODO: test conservativness
-    # TODO: implement open boundary type
-    # TODO: implement moving boundary type
+    # TODO: implement "do nothing" boundary type
+    # TODO: implement moving walls (wallu field)
 
-    # PARAMS ======================
+    # ==============================
+    #          PARAMS 
+    # ==============================
     global nx, ny, nu, Lx, Ly, dx, dy, dt
     nx = 270 #num cells
     ny = 120
@@ -1175,9 +1198,7 @@ def main():
     dy = Ly/ny
     dt = 4e-3
     t0 = 0 #begin time
-    t1 = 1.5 #end time
-    display_pause = 0 #pause in seconds after each iteration for debugging
-    display_every = 25 #update display every X iters. (matplotlib is slow)
+    t1 = 2 #end time
 
     global rho, beta, phi_width, phi_eps, phi_delta, phi_cutoff
     rho = 1 #density.
@@ -1187,39 +1208,10 @@ def main():
     phi_width = 8 #width of the phase interface in cells
     phi_eps = calc_phi_eps(phi_width) #width of the phase interface (between phi_cutoff) in real units 
     # phi_width = calc_phi_w(phi_eps)
-    
-    proj_iters = 1 #iterations each time step to minimize splitting error caused by projection method
-    # proj_variant = "non-increment"
-    proj_variant = "increment"
-    # proj_variant = "increment-rot"
-    #whether to use extrapolation from several prev several 
-    # iters to obtain a guess for the next value. When 
-    proj_guess_p = True 
-    proj_guess_u = True 
 
-    #if true uses guessed variables as prev iter during predictor 
-    # if false uses them only as x0 in linear matrix solve,
-    proj_guess_predictor = True
-
-    # Whether to use "prev iter" (or guessed) or previous iterate as 
-    # the other velocity in advection. Does nothing if proj_iters = 1.
-    proj_nonlinear = True 
-    
-    # Whether to use the proper phase-avare poisson solve or 
-    # the classic phase-oblivious poisson solve
-    proj_phase_corrector = True
-
-    # These control when / if the given variable will be projected 
-    # onto the phase perscribed value. If not set is not applied.
-    # Ie if cutoff_u = 0.2 then in all places where phi < 0.2, u will 
-    # be considered a wall thus will be set to the wall velocity (0).
-    global cutoff_u, cutoff_p, cutoff_u_post, cutoff_p_post, cutoff_u_corr
-    cutoff_u = 0.1 #applied during iterative solve of velocity
-    # cutoff_p = 0.2 #applied during iterative solve of pressure
-    # cutoff_u_post = 0.2 #applied at the end of the timestep
-    # cutoff_p_post = 0.5 #applied at the end of the timestep
-    # cutoff_u_corr = 0.5 #applied during corrector update of velocity
-    
+    # ==============================
+    #            DOMAIN
+    # ==============================
     example_fields = False
     # example_fields = True
     phase_field = True
@@ -1234,10 +1226,55 @@ def main():
     # domain = {'type':"channel_cavity", "gap":0.2}
     # domain = {'type':"real_cavity"}
 
+    # ==============================
+    #      PROJECTION METHOD 
+    # ==============================
+    proj_outer_iters = 1 #iterations each time step to minimize splitting error caused by projection method
+    # proj_variant = "non-increment"
+    proj_variant = "increment"
+    # proj_variant = "increment-rot"
+
+
+    # The method used for time stepping:
+    # 0.0: explicit first order
+    # 0.5: crank-nicolson second order
+    # 1.0: implicit first order
+    # ...or values in between though all of those are first order
+    proj_time_stepping_coefficient = 1
+
+    #whether to use extrapolation from several prev several 
+    # iters to obtain a guess & prediction for the next value. 
+    # defines the order: 0 = no extrapolation, 1 = linear, 2 = quadratic
+    proj_extrapolate_u = 2 
+    proj_extrapolate_p = 2 
+
+    # Whether to use previous iteration/extrapolated or previous iterate as 
+    # the other velocity in advection. 
+    proj_nonlinear_predictor = True 
+    
+    # Whether to use the proper phase-avare poisson solve or 
+    # the classic phase-oblivious poisson solve
+    proj_phase_corrector = True
+
+    # preconditioner applied to pressure solve
+    proj_preconditioner_every = 30
+    proj_preconditioner_fill_factor = 35
+    
+    proj_pred_maxiter = 100
+    proj_corr_maxiter = 1000
+    
+    proj_phase_cutoff = 0.1 #applied during iterative solve of velocity
+
     advect_params = AdvectParams() 
     advect_params.limiter = "vanalbada"
     advect_params.variant = "advect"
     advect_params.blend_factor = 0.85
+
+    # ==============================
+    #      VISUALISATION 
+    # ==============================
+    display_pause = 0 #pause in seconds after each iteration for debugging
+    display_every = 25 #update display every X iters. (matplotlib is slow)
 
     # display_field = ""
     # display_field = "p"
@@ -1248,8 +1285,7 @@ def main():
     # display_field = "predv"
     # display_field = "predmag"
     # display_field = "divpred"
-    # display_field = "corrpred"
-    # display_field = "lapcorrpred"
+    # display_field = "dp"
     # display_field = "psiu"
     # display_field = "psiv"
     # display_field = "psimag"
@@ -1267,14 +1303,15 @@ def main():
     display_face_velocity_arrows = False
     display_face_velocity_arrows_offsets = False
     display_streamlines = False 
-    display_streamlines_thickness = False 
 
-    # initial conditions
+    # ==============================
+    #      INITIAL CONDITIONS 
+    # ==============================
     boundaries, sdf = make_domain(domain, 0, parabolic_profile, phase_filed_domain)
     phi = sdf_to_phase_field(sdf)
     phi_outline = marching_squares(sdf, 0)
 
-    cutoff_outline = marching_squares(phi, cutoff_u)
+    cutoff_outline = marching_squares(phi, proj_phase_cutoff)
     
     fields = {
         "u": np.zeros((nx+1, ny)),
@@ -1283,8 +1320,13 @@ def main():
         "f": phi,
         "sdf": sdf,
     }
+    past_fields = []
+    max_history_len = 3
 
-    # Main loop
+    
+    # ==============================
+    #      MAIN LOOP
+    # ==============================
     plt.ion()
     fig = plt.figure(figsize=(6*Lx/Ly, 6), dpi=100)
     step = -1
@@ -1302,9 +1344,14 @@ def main():
         dt = t - t_old
         
         # BOUNDARIES =========================
-        u_in = min(1, t)
+        u_in = min(1, 10*t)
+        # u_in = 1
         boundaries, sdf = make_domain(domain, u_in, parabolic_profile, phase_filed_domain)
         low_bounds = Boundary.to_low_bounds(boundaries.values(), dictify=False)
+
+        past_fields = [fields] + past_fields
+        while len(past_fields) > max_history_len:
+            past_fields.pop()
 
         # SIMULATE ===========================
         if example_fields:
@@ -1314,10 +1361,21 @@ def main():
             new_fields = step_phase(
                 fields, low_bounds,
                 step=step,
+                past_fields = past_fields,
+                proj_preconditioner_every = proj_preconditioner_every,
+                proj_preconditioner_fill_factor = proj_preconditioner_fill_factor,
+
+                proj_phase_cutoff = proj_phase_cutoff,
+                proj_pred_maxiter = proj_pred_maxiter,
+                proj_corr_maxiter = proj_corr_maxiter,
+
+                proj_time_stepping_coefficient = proj_time_stepping_coefficient,
                 proj_phase_corrector=proj_phase_corrector,
+                proj_nonlinear_predictor = proj_nonlinear_predictor,
+                proj_extrapolate_u = proj_extrapolate_u, 
+                proj_extrapolate_p = proj_extrapolate_p, 
                 proj_variant=proj_variant, 
-                proj_iters=proj_iters, 
-                proj_nonlinear=proj_nonlinear,
+                proj_outer_iters=proj_outer_iters, 
                 advect_params=advect_params)
 
         fields.update(new_fields)
@@ -1340,7 +1398,6 @@ def main():
                 display_face_velocity_arrows = display_face_velocity_arrows,
                 display_face_velocity_arrows_offsets = display_face_velocity_arrows_offsets,
                 display_streamlines = display_streamlines,
-                display_streamlines_thickness = display_streamlines_thickness,
             )
             fig.canvas.draw()
             fig.canvas.flush_events()
@@ -1375,7 +1432,7 @@ def generate_example_fields() -> dict:
     fields["p"] = np.sin(np.pi * Xc/Lx) * np.cos(np.pi * Yc/Ly)
     return fields
 
-def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tuple[Boundaries, np.ndarray]:
+def make_domain(domain:dict, u_in:float, parabolic:bool, phase_field:bool) -> Tuple[Boundaries, np.ndarray]:
     def inflow_profile(u:float, n:int) -> np.ndarray:
         if parabolic == False:
             return np.full(n, u)
@@ -1383,7 +1440,7 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
         profile = u*(1 - (2*centers - 1)**2)
         return profile
 
-    sdf = np.zeros((nx, ny))
+    sdf = np.full((nx, ny), 1000)
     domain_variant = domain.get('type')
     if domain_variant == "channel" and phase_field == False:
         inflow = inflow_profile(u_in, ny)
@@ -1460,7 +1517,7 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
             dot_sdf = np.hypot(Xc - px, Yc - off*dy - py) - r
             sdf = np.minimum(sdf, dot_sdf)
 
-    if domain_variant == "channel_cavity" and phase_field == True:
+    elif domain_variant == "channel_cavity" and phase_field == True:
         w = phi_width//2 #wall width
         h = max((ny - 2*w)//5, 1)
         inflow = inflow_profile(u_in, h)
@@ -1486,6 +1543,8 @@ def make_domain(domain:str, u_in:float, parabolic:bool, phase_field:bool) -> Tup
             Boundary.noslip("S", np.arange(nx), 0),
             Boundary.noslip("N", np.arange(nx), ny-1),
         ])
+    else:
+        raise ValueError(f"Unknown domain variant / phase field {domain_variant=} {phase_field=}")
 
     return (boundaries, sdf)
 
@@ -1622,7 +1681,6 @@ def marching_squares(field, treshold):
     lines = np.array(lines)
     return lines
 
-
 from scipy.ndimage import zoom
 from matplotlib.collections import LineCollection
 def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict, 
@@ -1639,7 +1697,6 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     display_face_velocity_arrows = True,
     display_face_velocity_arrows_offsets = False,
     display_streamlines = False,
-    display_streamlines_thickness = False,
 ):
     dd = min(dx, dy)
 
@@ -1651,8 +1708,8 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     ax.set_ylim(-dy, (ny + 1) * dy)
     ax.set_aspect('equal')
 
-    velx = Interp_vels_to_cellx(uex)
-    vely = Interp_vels_to_celly(vex)
+    velx = interp_vels_to_cellx(uex)
+    vely = interp_vels_to_celly(vex)
     velmag = np.hypot(velx, vely)
 
     # Field drawing
@@ -1662,12 +1719,12 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     elif display_field == "v":      display_field_tuple = (vely, "velocity v")
     elif display_field == "velmag": display_field_tuple = (velmag, "velocity magnitude")
     elif display_field in ["predu", "predv", "predmag"] and "pred" in fields:
-        epred = bc_expand_vels(fields["pred"], (BCu, BCv))
-        predu = Interp_vels_to_cellx(epred[0]), 
-        predv = Interp_vels_to_celly(epred[1])
+        epred = bc_expand_vels(fields["pred"], (low_bounds['u'], low_bounds['v']))
+        predu = interp_vels_to_cellx(epred[0]) 
+        predv = interp_vels_to_celly(epred[1])
         if display_field == "predu": display_field_tuple = (predu, "predictor v")
         if display_field == "predv": display_field_tuple = (predv, "predictor u")
-        if display_field == "predmag": display_field_tuple = (np.hypot(iepred[0], iepred[1]), "predictor magnitude")
+        if display_field == "predmag": display_field_tuple = (np.hypot(predu, predv), "predictor magnitude")
     elif display_field in ["psiu", "psiv", "psimag"]:
         ru = (uex[:-2,1:-1] - uex[1:-1,1:-1])/(uex[1:-1,1:-1] - uex[2:,1:-1])
         rv = (vex[1:-1,:-2] - vex[1:-1,1:-1])/(vex[1:-1,1:-1] - vex[1:-1,2:])
@@ -1678,14 +1735,16 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
         psiv = np.zeros_like(vex)
         psiv[1:-1, 1:-1] = np.minimum((rv + np.abs(rv)) / (1 + np.abs(rv)), 1)
         
-        ipsi = [Interp_vels_to_cellx(psiu), Interp_vels_to_celly(psiv)]
-        if display_field == "psiu": display_field_tuple = (psiu, "psiu")
-        if display_field == "psiv": display_field_tuple = (psiv, "psiv")
+        ipsi = [interp_vels_to_cellx(psiu), interp_vels_to_celly(psiv)]
+        if display_field == "psiu": display_field_tuple = (psiu[:-1,:], "psiu")
+        if display_field == "psiv": display_field_tuple = (psiv[:,:-1], "psiv")
         if display_field == "psimag": display_field_tuple = (np.hypot(ipsi[0], ipsi[1]), "psimag")
-    elif display_field == "phase" and "f" in fields:
+    elif display_field == "dp" and "dp" in fields:
+        display_field_tuple = (bc_expand_cell(fields["dp"], low_bounds['p']), "pressure correction (dp)")
+    elif display_field == "phase" and "phase" in fields:
         display_field_tuple = (bc_expand_cell(fields["f"], low_bounds['f']), "phase")
-    elif display_field == "sdf" and "sdf" in fields and "f" in fields:
-        display_field_tuple = (bc_expand_cell(fields["sdf"], low_bounds['f']), "phase")
+    elif display_field == "sdf" and "sdf" in fields:
+        display_field_tuple = (bc_expand_cell(fields["sdf"], low_bounds['f']), "sdf")
 
     if display_field_tuple is not None:
         im = ax.imshow(display_field_tuple[0].T, origin='lower', extent=[-dx, (nx+1)*dx, -dy, (ny+1)*dy], interpolation='nearest')
@@ -1720,7 +1779,7 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     if display_velocity_arrows:
         scale = np.sqrt(30*30 / velx.size)
         stacked = [Xc, Yc, velx[1:-1,1:-1], vely[1:-1,1:-1]]
-        zoomed = [zoom(s, zoom=scale, order=1) if scale < 1 else stacked for s in stacked]
+        zoomed = [zoom(s, zoom=scale, order=1) for s in stacked] if scale < 1 else stacked
         px, py, vx, vy = zoomed[0], zoomed[1], zoomed[2], zoomed[3]
         ax.quiver(px, py, vx, vy, scale=scale/dd, angles='xy', scale_units='xy', units="dots", color=line_color, width=1)
 
@@ -1740,13 +1799,6 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     if display_streamlines:
         lw = 0.8
         density = 1
-        if display_streamlines_thickness:
-            min_w = 0.2
-            max_w = 3
-            vel = velmag[1:-1,1:-1]
-            lw = (max_w - min_w)*(vel / vel.max()) + min_w
-            lw = lw.T
-            density = 2
         ax.streamplot(Xc[:,0], Yc[0,:], velx[1:-1,1:-1].T, vely[1:-1,1:-1].T, color=line_color, density=density, linewidth=lw, arrowsize=0.7)
 
     if display_phase_walls and phi_outline is not None and len(phi_outline) > 0:

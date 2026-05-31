@@ -6,7 +6,7 @@ Modeling:
 - NSE 
 - Diffuse domain approach
 - boundary conditions
-- initial value problem 
+- initial–boundary-value problem
 
 Solution methods:
 - coupled matrix system
@@ -51,3 +51,6 @@ Results:
     - show how many CPU cores on perfect parallelism would be needed to match cuda.
 
 Outro etc
+
+
+Further down the line (thesis?) switch to IMEX schemes for better performance

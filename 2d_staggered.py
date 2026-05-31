@@ -876,11 +876,13 @@ def step_phase(
     fields:dict, low_bounds:dict,
     advect_params:AdvectParams | None = None, 
     past_fields : List[dict] | None = None,
-    proj_time_stepping_coefficient = 0.5,
     
-    proj_phase_corrector = True,
     proj_variant = "increment",
     proj_outer_iters = 1,
+
+    proj_bdf_order = 2,
+    proj_extrapolate_u = 2, 
+    proj_extrapolate_p = 2, 
 
     proj_pred_maxiter = 50,
     proj_corr_maxiter = 1000,
@@ -891,8 +893,9 @@ def step_phase(
     proj_preconditioner_fill_factor = 35,
 
     proj_nonlinear_predictor = False,
-    proj_extrapolate_u = 1, 
-    proj_extrapolate_p = 1, 
+    proj_phase_corrector = True,
+    proj_corr_p_bcs = False,
+    
     
     step = 0) -> dict:
 
@@ -957,24 +960,81 @@ def step_phase(
         vel_source[0] = interp_cell_to_vels(bc_expand_cell(source[0], BCphi))
         vel_source[1] = interp_cell_to_vels(bc_expand_cell(source[1], BCphi))
 
+    if proj_phase_corrector or proj_corr_p_bcs:
+        BC_corr = BCp
+    else:
+        BC_corr = {
+            "derW": LowBound("W", "der", 0, np.arange(ny), 0),
+            "derE": LowBound("E", "der", nx-1, np.arange(ny), 0),
+            "derS": LowBound("S", "der", np.arange(nx), 0, 0),
+            "derN": LowBound("N", "der", np.arange(nx), ny-1, 0),
+        }
+
+    # Below is implemented the BDFq time integration method.
+    # See: "An overview of projection methods for incompressible flows"
+    # https://www.math.purdue.edu/~shen7/pub/remarks_revised.pdf
+    # 
+    #   1. 1/dt[ us_coeff*us - rest(un) ] = Dif(us) - Adv(us, up) - grad(pp) + BC(us)  + S
+    # 
+    #   2. us_coeff/dt[ um - us] + grad(dp) = 0
+    # 
+    #   3. pm = pn + dp - nu*div(us)  
+    # 
+    # Where: 
+    #    us_coeff*us - rest(un) = "extrapolate us from un, un-1, ..." - un 
+    # us_coeff is simply the coefficient in front of us in this expression and
+    # rest is the rest of the terms
+    # 
+    # Thus the final solution is:
+    #  1. us - dt/us_coeff[ Dif(us) - Adv(us, up) + BC(us) ] = 1/us_coeff*rest(un) + dt/us_coeff[ -grad(pp) + S ]
+    #                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        ^^^^^^^^^^
+    #                                LIN                                                                FLAT
+    #  2. lap(dp) = us_coeff/dt * div(us)
+    # 
+    #  3. um = us - dt/us_coeff * grad(dp)
+    #     pm = pn + dp - nu*div(us)  
+    # 
+    # Where LIN, FLAT are just functions for ease of implementation (or rather ease of changing schemes)
+
+    # 1/dt[ us_coeff*us - rest(un) ] = -grad(pp)
+    # lap(dp) = us_coeff/dt * div(us)
+    proj_bdf_order = min(proj_bdf_order, len(past_fields)) 
+    proj_extrapolate_u = min(proj_extrapolate_u, len(past_fields)) 
+    proj_extrapolate_p = min(proj_extrapolate_p, len(past_fields)) 
+
+    # returns (us_coeff, rest(field))
+    def BDFq(order, field) -> Tuple[float, np.ndarray]:
+        if order == 2:
+            return (3/2, 2*past_fields[0][field] - 1/2*past_fields[1][field])
+        elif order == 1:
+            return (1, past_fields[0][field])
+        else:
+            raise ValueError(f"Invalid BDFq order {order} for field '{field}'")
+
+    us_coeff, rest_unx = BDFq(proj_bdf_order, "u")
+    us_coeff, rest_uny = BDFq(proj_bdf_order, "v")
+    rest_un = [rest_unx, rest_uny]
+
     # extrapolate previous solutions. This is used as initial guess for matrix solve
     # and depending on other settings during non-linear advection causing for faster 
     # convergence across outer iterations
-    um_extrapolated = list(un)
-    pm_extrapolated = pn
-    if past_fields:
-        def extrapolate(order, field):
-            if order >= 2 and len(past_fields) >= 3:
-                return 3*past_fields[0][field] - 3*past_fields[1][field] + past_fields[2][field]
-            elif order >= 1 and len(past_fields) >= 2:
-                return 2*past_fields[0][field] - past_fields[1][field]
-            else:
-                return past_fields[0][field]
+    def extrapolate(order, field):
+        order = min(order, len(past_fields))
+        if order == 3:
+            return 3*past_fields[0][field] - 3*past_fields[1][field] + past_fields[2][field]
+        elif order == 2:
+            return 2*past_fields[0][field] - past_fields[1][field]
+        elif order == 1:
+            return past_fields[0][field]
+        else:
+            raise ValueError(f"Invalid extrapolation order {order} for field '{field}'")
 
-        um_extrapolated[0] = extrapolate(proj_extrapolate_u, "u")
-        um_extrapolated[1] = extrapolate(proj_extrapolate_u, "v")
-        pm_extrapolated    = extrapolate(proj_extrapolate_p, "p")
+    um_extrapolated = [0, 0]
+    um_extrapolated[0] = extrapolate(proj_extrapolate_u, "u")
+    um_extrapolated[1] = extrapolate(proj_extrapolate_u, "v")
+    pm_extrapolated    = extrapolate(proj_extrapolate_p, "p")
 
+    freeze(rest_un)
     freeze(um_extrapolated)
     freeze(pm_extrapolated)
 
@@ -982,36 +1042,6 @@ def step_phase(
     umk = None
     pmk = None
     for k in range(proj_outer_iters):
-        # Below is implemented the crank-nicolson method for time integration.
-        # It starts from the semidiscrete scheme of our differential equation
-        #   du/dt = F[t](u)
-        # where F[t](u) is already spatially discretized function of u 
-        # (and its spacial derivatives) evaluated on the time level t. 
-        # 
-        # Now we discretize in time. Couple of common discretizations are: 
-        # - Explicit scheme: (um - un)/dt = F[n]
-        # - Implicit scheme: (um - un)/dt = F[m]
-        # - Crank-Nicolson:  (um - un)/dt = aF[m] + (1 - a)*F[n]
-        # where typically a=0.5. If a=1 then is implicit. If a=0 then is explicit.
-        # 
-        # For ease of implementation we split F[t](u) into
-        # F[t](u) = LIN[t](u) + FLAT[t]
-        # where LIN[t](u) are all the terms of F[t](u) that involve u and FLAT[t] the rest.
-        # 
-        # Expanding Crank-Nicolson we get:
-        # (um - un)/dt = a*(LIN[m] + FLAT[m]) + (1-a)*(LIN[n] + FLAT[n])
-        # um - dt*a*LIN[m] = un + dt*((1-a)*LIN[n] + (1-a)*FLAT[n] + a*FLAT[m])
-        # ^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        #    pred_lhs(um)     =     pred_rhs
-        # 
-        # Which is a linear system we can solve.
-        # 
-        # Our equation is (after dividing by φ)
-        #   du/dt = -(u*grad)u + nu*div(φgrad(u))/φ + BC(u)/φ  -grad(p)/rho + S
-        #           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
-        # So we have:         LIN[t](u)                           FLAT[t]
-        # 
-
         # This function prepares fields for LIN and FLAT to remove repeated computation
         def compute_interpolated(u, p) -> tuple:
             ex_unorm = bc_expand_vels(u, BCu)
@@ -1032,7 +1062,7 @@ def step_phase(
                 0.5*(ex_unorm[1][1:, 1:-1] + ex_unorm[1][:-1, 1:-1]),
             ]
             
-            ex_p = bc_expand_cell(p, BCp)
+            ex_p = bc_expand_cell(p, BC_corr)
             grad_p = grad_cell_to_vels(ex_p)
 
             return freeze((ex_unorm, ex_utang, face_unorm, face_utang, grad_p))
@@ -1045,7 +1075,7 @@ def step_phase(
 
             dif = nu*div_grad(phi_vel_face[d], uex)/vel_phi[d]
             BC = -beta/(phi_eps**2) * (1 - vel_phi[d])*(uex[1:-1, 1:-1] - vel_wallu[d][d])/vel_phi[d]
-            
+
             return -adv + dif + BC
 
         def FLAT(d:int, t:int, interpolated:tuple) -> np.ndarray:
@@ -1071,9 +1101,7 @@ def step_phase(
         # This can be arbitrary but can speed up iteration
         um_guess = um_extrapolated if k == 0 else umk
 
-        a = min(max(proj_time_stepping_coefficient, 0), 1)
-        interp_n = compute_interpolated(un, pn)                     if a < 1 else None
-        interp_m = compute_interpolated(um_predicted, pm_predicted) if a > 0 else None
+        interp_m = compute_interpolated(um_predicted, pm_predicted)
 
         us = list(um_predicted)
         for d in range(2):
@@ -1082,20 +1110,17 @@ def step_phase(
                 nonlocal pred_iters 
                 pred_iters += 1
                 uex = bc_expand_vel[d](u, BCu[d])
-                out = u - dt*a*LIN(uex, d, t, interp_m)
+                out = u - dt/us_coeff*LIN(uex, d, t, interp_m)
                 out = bc_apply_vel[d](out, BCu[d], copy=False)
                 out = phase_project(out, vel_phi[d], proj_phase_cutoff, copy=False)
                 return out
                 
-            pred_rhs = un[d].copy()
-            if a > 0: pred_rhs += dt*a*FLAT(d, t, interp_m) 
-            if a < 1: pred_rhs += dt*(1-a)*(LIN(interp_n[0][d], d, t, interp_n) + FLAT(d, t, interp_n))
+            pred_rhs = 1/us_coeff*rest_un[d] + dt/us_coeff*FLAT(d, t, interp_m) 
             pred_rhs = bc_apply_vel[d](pred_rhs, BCu[d], copy=False)
             pred_rhs = phase_project(pred_rhs, vel_phi[d], proj_phase_cutoff, copy=False)
 
             time_pred_solve_start = time.time_ns()
-            if a > 0: us[d], pred_iters_ret = matrix_free_solve(pred_lhs, pred_rhs, x0=um_guess[d], maxiter=proj_pred_maxiter)
-            else:     us[d], pred_iters_ret = pred_rhs, 0
+            us[d], pred_iters_ret = matrix_free_solve(pred_lhs, pred_rhs, x0=um_guess[d], maxiter=proj_pred_maxiter)
             time_pred_solve += time.time_ns() - time_pred_solve_start
 
             if pred_iters_ret < 0: print(f"Predictor breakdown at step {step}"); return {}
@@ -1119,20 +1144,27 @@ def step_phase(
  
         freeze(dp_guess)
 
-        div_phi_us = div_vels_to_cell([vel_phi[0]*us[0], vel_phi[1]*us[1]])
-
-        # a*dt*[div(φgrad(dp))] = div(φus) - g*grad(φ)
+        # dt/us_coeff*[div(φgrad(dp))] = div(φus) - g*grad(φ)
         if proj_phase_corrector:
-            corr_rhs = rho/(a*dt)*(div_phi_us - dot(wallu, grad_phi_cells))
+            div_phi_us = div_vels_to_cell([vel_phi[0]*us[0], vel_phi[1]*us[1]]) #TODO: verify when it should be div_phi_us and when just div_us
+            corr_rhs = us_coeff*rho/dt*(div_phi_us - dot(wallu, grad_phi_cells))
             corr_eq = mat_div_grad((nx, ny), vel_phi)
-        # a*dt*[div(grad(dp))] = div(us)
-        else:
-            corr_rhs = rho/(a*dt)*(div_us)
-            corr_eq = mat_lap((nx, ny))
 
-        corr_eq = mat_apply_cell_bcs(corr_eq, BCp)
-        A, b = mat_stencil_to_dia(corr_eq - mat_off(corr_rhs))
-    
+            corr_eq = mat_apply_cell_bcs(corr_eq - mat_off(corr_rhs), BC_corr)
+        # dt/us_coeff*[div(grad(dp))] = div(us)
+        else:
+            corr_rhs = us_coeff*rho/dt*(div_us)
+            corr_eq = mat_lap((nx, ny))
+            if proj_corr_p_bcs:
+                corr_eq = mat_apply_cell_bcs(corr_eq - mat_off(corr_rhs), BC_corr)
+            else:
+                # Make sure the eq is silved with homo. neumann bcs
+                # that the RHS is normallize and one DOF is pinned (othewise the matrix is singular)
+                corr_rhs = corr_rhs - corr_rhs.mean()
+                corr_eq = mat_apply_cell_bcs(corr_eq - mat_off(corr_rhs), BC_corr)
+                mat_pin(corr_eq, nx//2, ny//2, 0, direct=False)
+        A, b = mat_stencil_to_dia(corr_eq)
+
         global M
         if M is None or step % proj_preconditioner_every == 0 and k == 0:
             M = ilu_preconditioner(A, fill_factor=proj_preconditioner_fill_factor)
@@ -1144,23 +1176,24 @@ def step_phase(
         if corr_iters_info < 0: print(f"Corrector breakdown at step {step}"); return {"pred": us}
         if corr_iters_info > 0: print(f"Corrector slow convergence ({corr_iters} iters) at step {step}")
 
-        # def norm(x): return np.sqrt(np.sum(x*x))
-        # print(f"corrector L2:{norm(dp)}: sign:")
         time_corr += time.time_ns() - time_corr_start
         
         #UPDATES ============================
-        grad_q = grad_cell_to_vels(bc_expand_cell(dp, BCp)) 
-        freeze(grad_q)
+        grad_dp = grad_cell_to_vels(bc_expand_cell(dp, BC_corr)) 
+        freeze(grad_dp)
 
         um = [None, None]
-        um[0] = us[0] - a*dt/rho*grad_q[0]
-        um[1] = us[1] - a*dt/rho*grad_q[1]
+        um[0] = us[0] - dt/us_coeff*rho*grad_dp[0]
+        um[1] = us[1] - dt/us_coeff*rho*grad_dp[1]
         um = bc_apply_vels(um, BCu, copy=False)
 
         if   proj_variant == "non-increment":    pm = dp
         elif proj_variant == "increment":        pm = pm_predicted + dp
         elif proj_variant == "increment-rot":    pm = pm_predicted + dp - nu*div_us
 
+        # def norm(x): return np.sqrt(np.sum(x*x))
+        # print(f"corrector L2:{norm(dp)}: sign:")
+        # print(f"div pred:{norm(div_vels_to_cell(us))} div final:{norm(div_vels_to_cell(um))}")
         # print(f"lap pred:{norm(lap(pm_predicted))} lap final:{norm(lap(pm))}")
 
         umk = freeze(um)
@@ -1179,8 +1212,6 @@ def step_phase(
     return {"u": umk[0], "v": umk[1], "p":pmk, "pred": us, "dp":dp}
 
 def main():
-    # TODO: cleanup naming
-    # TODO: cleanup cutoff. apply cutoff to phase by expanding the velocity cutoff!
     # TODO: test conservativness
     # TODO: implement "do nothing" boundary type
     # TODO: implement moving walls (wallu field)
@@ -1189,8 +1220,8 @@ def main():
     #          PARAMS 
     # ==============================
     global nx, ny, nu, Lx, Ly, dx, dy, dt
-    nx = 270 #num cells
-    ny = 120
+    nx = 180 #num cells
+    ny = 80
     nu = 1.3059e-5 #viscosity
     Ly = 1 #size of domain in meters
     Lx = Ly*nx/ny 
@@ -1198,7 +1229,7 @@ def main():
     dy = Ly/ny
     dt = 4e-3
     t0 = 0 #begin time
-    t1 = 2 #end time
+    t1 = 8 #end time
 
     global rho, beta, phi_width, phi_eps, phi_delta, phi_cutoff
     rho = 1 #density.
@@ -1231,30 +1262,31 @@ def main():
     # ==============================
     proj_outer_iters = 1 #iterations each time step to minimize splitting error caused by projection method
     # proj_variant = "non-increment"
-    proj_variant = "increment"
-    # proj_variant = "increment-rot"
+    # proj_variant = "increment"
+    proj_variant = "increment-rot"
 
+    # Defines the BDFq order of the time stepping. 
+    # Allowed values are {1, 2, 3}
+    proj_bdf_order = 1
 
-    # The method used for time stepping:
-    # 0.0: explicit first order
-    # 0.5: crank-nicolson second order
-    # 1.0: implicit first order
-    # ...or values in between though all of those are first order
-    proj_time_stepping_coefficient = 1
-
-    #whether to use extrapolation from several prev several 
-    # iters to obtain a guess & prediction for the next value. 
-    # defines the order: 0 = no extrapolation, 1 = linear, 2 = quadratic
+    # Which order of extrapolation to use for the predicated values in NSE
+    # predictor. Allows {1, 2, 3} 
+    # 1 = previous value (first order)
+    # 2 = linear extrapolation (second order)
+    # 3 = quadratic extrapolation (third order)
+    # These should be equal to proj_bdf_order unless there is some problem with convergence
     proj_extrapolate_u = 2 
     proj_extrapolate_p = 2 
 
-    # Whether to use previous iteration/extrapolated or previous iterate as 
+    # Whether to use previous iteration/extrapolated 
+    # or previous non-linear iterate as 
     # the other velocity in advection. 
     proj_nonlinear_predictor = True 
     
     # Whether to use the proper phase-avare poisson solve or 
     # the classic phase-oblivious poisson solve
-    proj_phase_corrector = True
+    proj_phase_corrector = False
+    proj_corr_p_bcs = True
 
     # preconditioner applied to pressure solve
     proj_preconditioner_every = 30
@@ -1278,6 +1310,7 @@ def main():
 
     # display_field = ""
     # display_field = "p"
+    # display_field = "gradp"
     # display_field = "u"
     # display_field = "v"
     display_field = "velmag"
@@ -1321,7 +1354,7 @@ def main():
         "sdf": sdf,
     }
     past_fields = []
-    max_history_len = 3
+    max_history_len = max(proj_bdf_order, proj_extrapolate_u, proj_extrapolate_p, 1)
 
     
     # ==============================
@@ -1344,7 +1377,7 @@ def main():
         dt = t - t_old
         
         # BOUNDARIES =========================
-        u_in = min(1, 10*t)
+        u_in = min(1, t)
         # u_in = 1
         boundaries, sdf = make_domain(domain, u_in, parabolic_profile, phase_filed_domain)
         low_bounds = Boundary.to_low_bounds(boundaries.values(), dictify=False)
@@ -1369,11 +1402,13 @@ def main():
                 proj_pred_maxiter = proj_pred_maxiter,
                 proj_corr_maxiter = proj_corr_maxiter,
 
-                proj_time_stepping_coefficient = proj_time_stepping_coefficient,
-                proj_phase_corrector=proj_phase_corrector,
-                proj_nonlinear_predictor = proj_nonlinear_predictor,
+                proj_bdf_order = proj_bdf_order,
                 proj_extrapolate_u = proj_extrapolate_u, 
                 proj_extrapolate_p = proj_extrapolate_p, 
+
+                proj_phase_corrector=proj_phase_corrector,
+                proj_corr_p_bcs = proj_corr_p_bcs,
+                proj_nonlinear_predictor = proj_nonlinear_predictor,
                 proj_variant=proj_variant, 
                 proj_outer_iters=proj_outer_iters, 
                 advect_params=advect_params)
@@ -1718,6 +1753,12 @@ def plot(fig, ax, fields:dict, boundaries:dict, low_bounds:dict,
     elif display_field == "u":      display_field_tuple = (velx, "velocity u")
     elif display_field == "v":      display_field_tuple = (vely, "velocity v")
     elif display_field == "velmag": display_field_tuple = (velmag, "velocity magnitude")
+    
+    elif display_field == "gradp":      
+        grad_p = grad(ex_p)
+        mag = np.hypot(grad_p[0], grad_p[1])
+        display_field_tuple = (bc_expand_cell(mag, low_bounds['p']), "gradp")
+
     elif display_field in ["predu", "predv", "predmag"] and "pred" in fields:
         epred = bc_expand_vels(fields["pred"], (low_bounds['u'], low_bounds['v']))
         predu = interp_vels_to_cellx(epred[0]) 

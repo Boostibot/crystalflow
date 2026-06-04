@@ -118,12 +118,13 @@ Useful stuff IMEX schemes particularly about variable viscocity which I might ne
 https://web.math.princeton.edu/~weinan/pdf%20files/projection%20method%20i.pdf  
 Another similar classic paper
 
+
+### A Diffuse-Domain Based Numerical Method for a Chemotaxis-Fluid Model
+https://arxiv.org/pdf/2209.08357
+some paper on specific flow problem using diffuse domain approach. Could be helpful reference for language/notation/style of formulation of the FVM/FDM discretization. Uses very similar BDFq method, staggred grid, flux limiter (minmod). 
+
 #### To look into
 - When is vortex shedig expected?
-- far-field BC
-- free BC
-- open BC
-
 - Lipschitz boundary
 
 ## On the design

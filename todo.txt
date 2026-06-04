@@ -5,7 +5,7 @@ Intro etc
 Modeling:
 - NSE 
 - Diffuse domain approach
-- boundary conditions
+- boundary conditions (slip, no-slip, inflow, outflow - complex. Test functions?)
 - initial–boundary-value problem
 
 Solution methods:
@@ -13,19 +13,20 @@ Solution methods:
 - Projection method
     - derivation
     - iterated method
-    - derivation for phase field modification
-    - boundary conditions for projection method
+    - phase field modification
+    - boundary conditions for projection method + phase field 
 
 Discretization:
-- staggered grid
-    - boundary treatment on staggered grid (Here ?)
 - FVM discretization
     - conservativness & advection
     - flux limitting (pictures!)
-- crank nicolson
+- staggered grid
+    - boundary treatment on staggered grid (Here or in implementation?)
+- BDFq scheme and order of approximation
 - fully discrete scheme
 
 Implementation (This chapter is the only optional one thus can be trimmed significantly):
+- domain definition using SDFs
 - handling of phi=0 (it is here we introduce cutoff!)
 - numerical methods
     - pseudocode of bigcstab

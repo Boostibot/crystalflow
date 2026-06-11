@@ -1,10 +1,14 @@
-import time
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Literal, Callable, Iterable, Union, Any
+from pathlib import Path
+
+import json
+import math
+import time
 
 # Globals. Uniform model parameters are used as globals for convenience.
 # The values are set in the main function
@@ -820,42 +824,38 @@ def freeze(xs):
         xs.flags.writeable = False
     return xs
 
-#TODO: move more stuff into params, less as globals (just model params. Impl params will be arguments)
-step_total_time_sum = 0
-step_pred_time_sum = 0
-step_corr_time_sum = 0
-
-M = None
-
-
 StepState = Literal["okay", "predictor", "corrector"]
 
+from dataclasses import dataclass, field, asdict
+
+@dataclass
 class StepInfo:
-    iters:int
-    pred_iters:np.ndarray
-    corr_iters:np.ndarray 
-    state:List[StepState]
-    time_pred:np.ndarray
-    time_corr:np.ndarray
-    time_pred_solve:np.ndarray
-    time_corr_solve:np.ndarray
-    p_update_norm:np.ndarray
-    u_update_norm:np.ndarray
-    iters_completed:int = 0
-    time_step:float = 0
+    iters: int
+    pred_iters: np.ndarray = field(init=False)
+    corr_iters: np.ndarray = field(init=False)
+    state: List[str] = field(init=False)
+    time_pred: np.ndarray = field(init=False)
+    time_corr: np.ndarray = field(init=False)
+    time_pred_solve: np.ndarray = field(init=False)
+    time_corr_solve: np.ndarray = field(init=False)
+    p_update_norm: np.ndarray = field(init=False)
+    u_update_norm: np.ndarray = field(init=False)
 
-    def __init__(self, iters:int):
-        self.iters = iters
-        self.state = ["okay"]*iters
-        self.pred_iters = np.zeros(iters, dtype=int)
-        self.corr_iters = np.zeros(iters, dtype=int)
-        self.time_pred = np.zeros(iters, dtype=float)
-        self.time_corr = np.zeros(iters, dtype=float)
-        self.time_pred_solve = np.zeros(iters, dtype=float)
-        self.time_corr_solve = np.zeros(iters, dtype=float)
-        self.p_update_norm = np.zeros(iters, dtype=float)
-        self.u_update_norm = np.zeros(iters, dtype=float)
+    iters_completed: int = 0
+    time_step: float = 0
+    t: float = 0
 
+    def __post_init__(self):
+        self.state = ["okay"] * self.iters
+        self.pred_iters = np.zeros(self.iters, dtype=int)
+        self.corr_iters = np.zeros(self.iters, dtype=int)
+        self.time_pred = np.zeros(self.iters)
+        self.time_corr = np.zeros(self.iters)
+        self.time_pred_solve = np.zeros(self.iters)
+        self.time_corr_solve = np.zeros(self.iters)
+        self.p_update_norm = np.zeros(self.iters)
+        self.u_update_norm = np.zeros(self.iters)
+    
     def add(self, other:StepInfo):
         assert self.iters == other.iters
         self.iters_completed += other.iters_completed
@@ -868,6 +868,16 @@ class StepInfo:
         self.time_corr_solve += other.time_corr_solve 
         self.p_update_norm += other.p_update_norm 
         self.u_update_norm += other.u_update_norm 
+
+    def to_dict(self):
+        d = asdict(self)
+        for k, v in d.items():
+            if isinstance(v, np.ndarray):
+                d[k] = v.tolist()
+        return d
+
+    def to_json(self):
+        return json.dumps(self.to_dict())
 
 # Exact:      
 #   φdu/dt = -φ(u*grad)u + nu*div(φgrad(u)) - φgrad(p)/rho + φS + BCu
@@ -958,6 +968,7 @@ class StepInfo:
 #       dt*(div(φgrad(dp))) = div(φus) - div(φum) = div(φus) - g*grad(φ)
 #   where we used the modified continiuty condition. 
 #   
+M = None
 def step_phase(
     fields:dict, low_bounds:dict,
     advect_params:AdvectParams | None = None, 
@@ -1022,9 +1033,8 @@ def step_phase(
         [ex_phi[:,1:-1], vel_phi_corner],
         [vel_phi_corner, ex_phi[1:-1,:]]
     ]
-    # TODO: phi_vel_face can be tighteneded I think
 
-    # Prepare wall velocity and source terms ======================
+    # Prepare wall velocity and source terms (if provided)
     wallu = [0, 0]
     vel_wallu = [[0, 0], [0, 0]]
     if "wallu" in fields:
@@ -1038,6 +1048,11 @@ def step_phase(
         source = fields["source"]
         vel_source[0] = interp_cell_to_vels(bc_expand_cell(source[0], BCphi))
         vel_source[1] = interp_cell_to_vels(bc_expand_cell(source[1], BCphi))
+
+    freeze(source)
+    freeze(wallu)
+    freeze(vel_source)
+    freeze(vel_wallu)
 
     # Below is implemented the BDFq time integration method.
     # It is derived by expanding lagrange polynoms at q points 
@@ -1167,10 +1182,12 @@ def step_phase(
             ex_unorm, ex_utang, face_unorm, face_utang, grad_p = interpolated
             out = vel_source[d][d]
             if proj_variant != "non-increment": 
-                out -= 1/rho*grad_p[d]
+                out = out - 1/rho*grad_p[d]
             return out
 
-        #PREDICTOR ============================
+        # ============================
+        #         PREDICTOR 
+        # ============================
         time_pred_start = time.time_ns()
 
         # initial guess for solution. 
@@ -1207,7 +1224,10 @@ def step_phase(
 
             if pred_iters_ret < 0: info.state[k] = "predictor"; break
             if pred_iters_ret > 0: info.state[k] = "predictor_slow"
- 
+
+        # break from outer loop too
+        if info.state[k] == "predictor":
+            break
 
         us[0] = phase_project(us[0], vel_phi[0], proj_phase_cutoff, fill=vel_wallu[0][0], copy=False)    
         us[1] = phase_project(us[1], vel_phi[1], proj_phase_cutoff, fill=vel_wallu[1][1], copy=False)    
@@ -1215,7 +1235,9 @@ def step_phase(
         freeze(us)
         info.time_pred[k] = time.time_ns() - time_pred_start
 
-        #CORRECTOR ============================
+        # ============================
+        #         CORRECTOR 
+        # ============================
         time_corr_start = time.time_ns()
         div_us = div_vels_to_cell(us)
         if k == 0:
@@ -1227,7 +1249,7 @@ def step_phase(
 
         # dt/us_coeff*[div(φgrad(dp))] = div(φus) - g*grad(φ)
         if proj_phase_corrector:
-            div_phi_us = div_vels_to_cell([vel_phi[0]*us[0], vel_phi[1]*us[1]]) #TODO: verify when it should be div_phi_us and when just div_us
+            div_phi_us = div_vels_to_cell([vel_phi[0]*us[0], vel_phi[1]*us[1]])
             corr_rhs = us_coeff*rho/dt*(div_phi_us - dot(wallu, grad_phi_cells))
             corr_eq = mat_div_grad((nx, ny), vel_phi)
             corr_eq = mat_apply_cell_bcs(corr_eq - mat_off(corr_rhs), BCdp)
@@ -1266,17 +1288,15 @@ def step_phase(
         elif proj_variant == "increment":        pm = pm_predicted + dp
         elif proj_variant == "increment-rot":    pm = pm_predicted + dp - nu*div_us
 
+        # derive norm updates to later on assess the convergence of the nonlinear iterations
         def norm(x): return np.sqrt(np.sum(x*x))
         info.u_update_norm[k] = norm(umk[0] - um[0]) + norm(umk[1] - um[1])
         info.p_update_norm[k] = norm(pmk - pm)
 
         # relaxed update
-        umk = um
-        pmk = pm
-
-        # umk[0] = freeze(umk[0] + proj_relaxation_u*(um[0] - umk[0]))
-        # umk[1] = freeze(umk[1] + proj_relaxation_u*(um[1] - umk[1]))
-        # pmk    = freeze(pmk    + proj_relaxation_p*(pm - pmk))
+        umk[0] = freeze(umk[0] + proj_relaxation_u*(um[0] - umk[0]))
+        umk[1] = freeze(umk[1] + proj_relaxation_u*(um[1] - umk[1]))
+        pmk    = freeze(pmk    + proj_relaxation_p*(pm - pmk))
 
         info.iters_completed += 1
 
@@ -1300,7 +1320,7 @@ def main():
     dy = Ly/ny
     dt = 8e-3
     t0 = 0 #begin time
-    t1 = 4 #end time
+    t1 = 16 #end time (just stops, we can continue if we want to)
 
     global phi_beta, phi_width, phi_eps, phi_delta, phi_zero_val
     phi_beta = 0.02 #strength of phase imposed boundary conditions
@@ -1314,7 +1334,7 @@ def main():
     #            DOMAIN
     # ==============================
     # domain = {'type':"channel"}
-    # domain = {'type':"channel", "moving_top":True}
+    # domain = {'type':"channel", "moving_top":True, "profile":"linear_increasing"}
     domain = {'type':"channel", 'circle':True, 'dot_size':0.1*Ly, 'dot_offset':2, 'dot_posx':0.2*Lx, 'dot_posy':0.5*Ly}
     # domain = {'type':"cavity"}
     # domain = {'type':"channel_cavity", "gap":0.2}
@@ -1329,11 +1349,38 @@ def main():
 
     example_fields = False
     # example_fields = True
+    
+    inflow_time_progression = lambda t: 1
+    # inflow_time_progression = lambda t: min(1, t)
+    # inflow_time_progression = lambda t: min(1, 10*t)
+
+    wall_time_progression = lambda t: 1
+    # wall_time_progression = lambda t: min(1, t)
+    # wall_time_progression = lambda t: min(1, 10*t)
+
+    # ==============================
+    #     SAVING / LOADING
+    # ==============================
+    initial_state = None #all zeros
+    experiment_name = "flow_past_cylinder_high_res"
+    # initial_state = f"./snapshots/{experiment_name}/t=8.0"
+
+    # save_fields_path = None #dont save fields!
+    save_fields_path = f"./snapshots/{experiment_name}/"
+    
+    # save_path_stats = None #dont save stats!
+    save_path_stats = f"./snapshots/{experiment_name}/stats_"
+
+    save_every_offset = 0
+    save_every = 0.5
+    save_at_times = []
+    save_at_start = False
+    save_at_end = False
 
     # ==============================
     #      PROJECTION METHOD 
     # ==============================
-    proj_outer_iters = 3 #iterations each time step to minimize splitting error caused by projection method
+    proj_outer_iters = 1 #iterations each time step to minimize splitting error caused by projection method
     # proj_variant = "non-increment"
     # proj_variant = "increment"
     proj_variant = "increment-rot"
@@ -1342,7 +1389,7 @@ def main():
     # Allowed values are {1, 2}.
     # Note that this only holds for dirichlet boundaries.
     # For inlet-outlet type flows the convergece is worse.
-    proj_bdf_order = 1
+    proj_bdf_order = 2
 
     # Which order of extrapolation to use for the predicated values in NSE
     # predictor. Allows {1, 2, 3} 
@@ -1350,8 +1397,8 @@ def main():
     # 2 = linear extrapolation (second order)
     # 3 = quadratic extrapolation (third order)
     # These should be equal to proj_bdf_order unless there is some problem with convergence
-    proj_extrapolate_u = 1
-    proj_extrapolate_p = 1 
+    proj_extrapolate_u = 2
+    proj_extrapolate_p = 2
 
     # Whether to use previous iteration/extrapolated 
     # or previous non-linear iterate as 
@@ -1360,7 +1407,7 @@ def main():
     
     # Whether to use the proper phase-avare poisson solve or 
     # the classic phase-oblivious poisson solve
-    proj_phase_corrector = False
+    proj_phase_corrector = True
 
     # preconditioner applied to pressure solve
     proj_preconditioner_every = 30
@@ -1385,14 +1432,14 @@ def main():
     #      VISUALISATION 
     # ==============================
     display_pause = 0 #pause in seconds after each iteration for debugging
-    display_every = 0 #update display every X seconds. (matplotlib is slow)
+    display_every = 2 #update display every X seconds. (matplotlib is slow)
 
     # display_field = ""
-    display_field = "p"
+    # display_field = "p"
     # display_field = "gradp"
     # display_field = "u"
     # display_field = "v"
-    # display_field = "velmag"
+    display_field = "velmag"
     # display_field = "predu"
     # display_field = "predv"
     # display_field = "predmag"
@@ -1416,11 +1463,13 @@ def main():
     display_streamlines = False 
     display_contours = False
 
+    # Below this line there are dragons!
+
     # ==============================
     #      INITIAL CONDITIONS 
     # ==============================
-    u_in = 0
-    u_wall = 0
+    u_in = inflow_time_progression(0)
+    u_wall = wall_time_progression(0)
     boundaries, sdf, wallu, source = make_domain(domain, u_in, u_wall)
     phi = sdf_to_phase_field(sdf)
     phi_outline = marching_squares(sdf, 0)
@@ -1434,8 +1483,16 @@ def main():
         "f": phi,
         "sdf": sdf,
         "wallu": wallu,
-        "source":source,
+        "source": source,
     }
+    if isinstance(initial_state, str):
+        try:
+            json_str = Path(initial_state).read_text()
+            json_val = json.loads(json_str)
+            fields = dict_load_base64(json_val)
+        except e:
+            print(f"Couldnt find initial state cause {e}")
+    
     past_fields = []
     max_history_len = max(proj_bdf_order, proj_extrapolate_u, proj_extrapolate_p, 1)
 
@@ -1444,6 +1501,32 @@ def main():
     # ==============================
     simulation_paused = False
     had_display_change = False
+
+    info_aggregated = StepInfo(iters=proj_outer_iters)
+    info_history = []
+
+    start = time.time_ns()
+    time_last_print = 0
+    step = -1
+    t = t0
+
+    def print_aggregated_info(start, steps):
+        def print_both_ways(x, units=""):
+            return f"{sum(x):.3}{units} | {[float(i) for i in x]}"
+        
+        dur = time.time_ns() - start
+        steps = step+1
+        print(f"took {dur*1e-9}s step {info_aggregated.time_step*1e-9}s steps:{steps}")
+        print(f"iters_completed {info_aggregated.iters_completed / steps:.3}")
+        print(f"pred_iters      {print_both_ways(info_aggregated.pred_iters / steps)}")
+        print(f"corr_iters      {print_both_ways(info_aggregated.corr_iters / steps)}") 
+        print(f"time_step       {print_both_ways([1e-6 * info_aggregated.time_step / steps], "ms")}")
+        print(f"time_pred       {print_both_ways(1e-6 * info_aggregated.time_pred / steps, "ms")}")
+        print(f"time_corr       {print_both_ways(1e-6 * info_aggregated.time_corr / steps, "ms")}")
+        print(f"time_pred_solve {print_both_ways(1e-6 * info_aggregated.time_pred_solve / steps, "ms")}")
+        print(f"time_corr_solve {print_both_ways(1e-6 * info_aggregated.time_corr_solve / steps, "ms")}")
+        print(f"p_update_norm   {list(info_aggregated.p_update_norm / info_aggregated.p_update_norm[0] )}")
+        print(f"u_update_norm   {list(info_aggregated.u_update_norm / info_aggregated.u_update_norm[0] )}")
 
     def on_key(event):
         nonlocal had_display_change
@@ -1470,6 +1553,12 @@ def main():
             curri = possible_fields.index(display_field)
             nexti = (curri + 1) % len(possible_fields)
             display_field = possible_fields[nexti]
+
+        if event.key == "i": #print info
+            print_aggregated_info(start, step+1)
+        if event.key == "shift+s" or event.key == "S":
+            dict_os_save(fields, t)
+            
         if event.key == "shift+q" or event.key == "Q": display_cell_centers = not display_cell_centers 
         if event.key == "shift+w" or event.key == "W": display_grid = not display_grid 
         if event.key == "shift+e" or event.key == "E": display_BCs = not display_BCs 
@@ -1487,30 +1576,71 @@ def main():
     fig = plt.figure(figsize=(6*Lx/Ly, 6), dpi=100)
     fig.canvas.mpl_connect("key_press_event", on_key)
 
-    start = time.time_ns()
-    time_last_print = 0
+    def dict_os_save(fields, t):
+        if save_fields_path is not None:
+            filename = f"{save_fields_path}t={float(t):.03}"
+            print(f"saving fields to {filename}")
 
-    info_aggregated = StepInfo(iters=proj_outer_iters)
+            dictified = dict_save_base64(fields)
+            json_str = json.dumps(dictified, indent=4)
 
-    step = -1
-    t = t0 - dt
-    #we calculate dt each step to fit the update. 
-    # This matters most in the last step where dt is smaller
-    normal_dt = dt 
-    while t != t1:
-        if simulation_paused == False:
-            step += 1
-            t_old = t
-            t = min(t0 + step*normal_dt, t1)
-            dt = t - t_old
+            path = Path(filename)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json_str)
+
+        nonlocal info_history
+        if save_path_stats is not None:
+            filename = f"{save_path_stats}t={float(t):.03}"
+            print(f"saving stats to {filename}")
+            json_str = json.dumps(info_history, indent=4,
+                default=lambda x: x.to_dict() if isinstance(x, StepInfo) else x)
             
-            # BOUNDARIES =========================
-            # u_in = min(1, t)
-            u_in = 1
-            u_wall = u_in
+            path = Path(filename)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json_str)
+
+        info_history = []
+
+    if save_at_start:
+        dict_os_save(fields, t)
+
+    save_every_i = math.floor((t - save_every_offset) / save_every) + 1
+    while True:
+        if simulation_paused == False:
+            # stopping appropriately
+            if t >= t1 and t - dt < t1:
+                simulation_paused = True
+                print_aggregated_info(start, step+1)
+                if save_at_end:
+                    dict_os_save(fields, t)
+
+            # saving 
+            next_save_every = save_every_offset + save_every_i*save_every
+            should_save_cause_every = t >= next_save_every and t - dt < next_save_every
+            if should_save_cause_every:
+                save_every_i += 1
+
+            should_save_cause_every_at_time = False
+            for save_t in save_at_times:
+                if t >= save_t and t - dt < save_t:
+                    should_save_cause_every_at_time = True
+
+            if save_every < dt:
+                should_save_cause_every = True
+            if should_save_cause_every or should_save_cause_every_at_time:
+                dict_os_save(fields, t)
+
+            # incr
+            step += 1
+            t = t0 + step*dt
+            
+            # DOMAIN =========================
+            u_in = inflow_time_progression(t)
+            u_wall = wall_time_progression(t)
             boundaries, fields["sdf"], fields["wallu"], fields["source"] = make_domain(domain, u_in, u_wall)
             low_bounds = Boundary.to_low_bounds(boundaries.values())
 
+            # manage past history
             past_fields = [fields] + past_fields
             while len(past_fields) > max_history_len:
                 past_fields.pop()
@@ -1547,6 +1677,7 @@ def main():
                     proj_pred_rtol = proj_pred_rtol,
                     proj_corr_rtol = proj_corr_rtol,
                 )
+                info.t = t
 
                 for k, s in enumerate(info.state): 
                     if s != "okay":
@@ -1562,6 +1693,7 @@ def main():
                 time_corr_perc = int(sum(info.time_corr)/info.time_step*100)
                 print(f"time {time_step}ms pred {pred_iters}:{time_pred_perc}% corr {time_corr}ms:{time_corr_perc}%")
 
+                info_history.append(info)
                 info_aggregated.add(info)
 
             fields.update(new_fields)
@@ -1602,25 +1734,6 @@ def main():
         if display_pause > 0:
             time.sleep(display_pause) 
 
-    dur = time.time_ns() - start
-    global step_total_time_sum, step_pred_time_sum, step_corr_time_sum
-
-    def print_both_ways(x, units=""):
-        return f"{sum(x):.3}{units} | {[float(i) for i in x]}"
-
-    steps = step+1
-    print(f"took {dur*1e-9}s step {info_aggregated.time_step*1e-9}s steps:{steps}")
-    print(f"iters_completed {info_aggregated.iters_completed / steps:.3}")
-    print(f"pred_iters      {print_both_ways(info_aggregated.pred_iters / steps)}")
-    print(f"corr_iters      {print_both_ways(info_aggregated.corr_iters / steps)}") 
-    print(f"time_step       {print_both_ways([1e-6 * info_aggregated.time_step / steps], "ms")}")
-    print(f"time_pred       {print_both_ways(1e-6 * info_aggregated.time_pred / steps, "ms")}")
-    print(f"time_corr       {print_both_ways(1e-6 * info_aggregated.time_corr / steps, "ms")}")
-    print(f"time_pred_solve {print_both_ways(1e-6 * info_aggregated.time_pred_solve / steps, "ms")}")
-    print(f"time_corr_solve {print_both_ways(1e-6 * info_aggregated.time_corr_solve / steps, "ms")}")
-    print(f"p_update_norm   {list(info_aggregated.p_update_norm / info_aggregated.p_update_norm[0] )}")
-    print(f"u_update_norm   {list(info_aggregated.u_update_norm / info_aggregated.u_update_norm[0] )}")
-
     plt.ioff()
     plt.show()
 
@@ -1644,28 +1757,34 @@ def generate_example_fields() -> Tuple[dict, dict]:
     return fields, {}
 
 def make_domain(domain:dict, u_in:float, u_wall:float) -> Tuple[Boundaries, np.ndarray, np.ndarray, np.ndarray]:
-    phase_field = "phase_field" in domain and domain["phase_field"] is True
-
-    parabolic = True #TODO
     def inflow_profile(u:float, n:int) -> np.ndarray:
-        if parabolic == False:
-            return np.full(n, u)
         centers = (np.arange(n) + 0.5)/n
-        profile = u*(1 - (2*centers - 1)**2)
-        return profile
+        if "profile" not in domain or domain["profile"] == "parabolic":
+            profile = u*(1 - (2*centers - 1)**2)
+            return profile
+        if domain["profile"] == "flat":
+            return np.full(n, u)
+        if domain["profile"] == "linear_increasing":
+            return centers * u
+        if domain["profile"] == "linear_decreasing":
+            return np.flip(centers) * u
+        assert False
 
     source = [np.zeros((nx, ny)), np.zeros((nx, ny))]
     wallu = [np.zeros((nx, ny)), np.zeros((nx, ny))]
     sdf = np.full((nx, ny), 1000)
 
+    phase_field = "phase_field" in domain and domain["phase_field"] is True
     domain_variant = domain.get('type')
     if domain_variant == "channel" and phase_field == False:
+        bc_velx = u_wall if 'moving_top' in domain else 0
+
         inflow = inflow_profile(u_in, ny)
         boundaries = Boundary.to_dict([
             Boundary.inflow("W", 0, np.arange(ny), inflow, 0),
             Boundary.outflow("E", nx-1, np.arange(ny)),
             Boundary.noslip("S", np.arange(nx), 0),
-            Boundary.noslip("N", np.arange(nx), ny-1),
+            Boundary.noslip("N", np.arange(nx), ny-1, velx=bc_velx),
         ])
     elif domain_variant == "cavity" and phase_field == False:
         boundaries = Boundary.to_dict([
@@ -1710,9 +1829,7 @@ def make_domain(domain:dict, u_in:float, u_wall:float) -> Tuple[Boundaries, np.n
         wall[:, -w:] = 1
         sdf = sdf_from_mask(wall)
 
-        if 'moving_top' in domain:
-            wallu[0][:, -w:] = u_wall
-            
+        wallu[0][:, -w:] = bc_velx
         if 'circle' in domain:
             r   = domain['dot_size']
             px  = domain['dot_posx']
@@ -1755,6 +1872,39 @@ def make_domain(domain:dict, u_in:float, u_wall:float) -> Tuple[Boundaries, np.n
         raise ValueError(f"Unknown domain variant / phase field {domain_variant=} {phase_field=}")
 
     return (boundaries, sdf, wallu, source)
+
+import base64
+def dict_save_base64(obj):
+    if isinstance(obj, np.ndarray):
+        base64_str = base64.b64encode(obj.tobytes()).decode("utf-8")
+        return {
+            "$schema$": "np.ndarray",
+            "shape": list(obj.shape), 
+            "dtype": str(obj.dtype), 
+            "data": base64_str,
+        }
+    if isinstance(obj, dict):
+        return {key:dict_save_base64(val) for key,val in obj.items()}
+    if isinstance(obj, (tuple, list)):
+        return [dict_save_base64(val) for val in obj]
+    if isinstance(obj, (None, bool, int, float)):
+        return obj
+    raise ValueError("Unexpected type provided!")
+
+def dict_load_base64(obj):
+    if isinstance(obj, dict):
+        if obj.get("$schema$", "") == "np.ndarray":
+            return np.frombuffer(
+                base64.b64decode(obj["data"]),
+                dtype=obj["dtype"]
+            ).reshape(obj["shape"])
+        else:
+            return {key:dict_load_base64(val) for key,val in obj.items()}
+    if isinstance(obj, (tuple, list)):
+        return [dict_load_base64(val) for val in obj]
+    if isinstance(obj, (None, bool, int, float)):
+        return obj
+    raise ValueError("Unexpected type provided!")
 
 from scipy.ndimage import distance_transform_edt
 def sdf_from_mask(mask: np.ndarray) -> np.ndarray:
